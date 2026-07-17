@@ -11,8 +11,7 @@ use crate::app::AppState;
 use crate::cooldown;
 use crate::models::{Monitor, Trigger};
 use crate::notify::{templates, EmailMsg, SmtpConfig, TemplateCtx};
-
-const DEFAULT_COOLDOWN_MINUTES: i64 = 15;
+use crate::settings_store;
 
 fn now() -> i64 {
     SystemTime::now()
@@ -57,12 +56,7 @@ pub async fn on_transition(
 ) -> anyhow::Result<()> {
     let now = now();
 
-    let cooldown_minutes: i64 =
-        sqlx::query_scalar::<_, String>("SELECT value FROM settings WHERE key = 'notify.cooldown_minutes'")
-            .fetch_optional(&state.db)
-            .await?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_COOLDOWN_MINUTES);
+    let cooldown_minutes = settings_store::cooldown_minutes(&state.db).await;
 
     let channels: Vec<AttachedChannel> = sqlx::query_as(
         "SELECT nc.id AS channel_id, nc.config AS config, mn.triggers AS triggers
