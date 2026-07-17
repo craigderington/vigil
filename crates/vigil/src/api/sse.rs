@@ -42,12 +42,18 @@ pub async fn sse_handler(
     tokio::spawn(async move {
         let mut id = 0u64;
 
+        // Subscribe BEFORE building the snapshot: build_snapshot awaits a DB
+        // query, and a broadcast::Receiver only sees messages sent after it
+        // subscribes. Snapshotting first would leave a window where an event
+        // broadcast during that query is silently lost. A duplicate event
+        // landing right after the snapshot is harmless; a gap is not.
+        let mut bus_rx = state.bus.subscribe();
+
         let snap = build_snapshot(&state).await;
         if tx.send(Ok(to_sse(&snap, id))).await.is_err() {
             return;
         }
 
-        let mut bus_rx = state.bus.subscribe();
         loop {
             match bus_rx.recv().await {
                 Ok(ev) => {

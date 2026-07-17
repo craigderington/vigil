@@ -261,13 +261,11 @@ pub async fn stats(
     .await
     .map_err(db_err)?;
 
-    let incidents: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM incidents WHERE monitor_id = ? AND started_at >= ?")
-            .bind(id)
-            .bind(window_start)
-            .fetch_one(&state.db)
-            .await
-            .map_err(db_err)?;
+    // Reuse the already-computed `spans` (overlapping the window) rather than
+    // a separately-scoped `started_at >= window_start` query — that narrower
+    // window would undercount incidents still open from before the window
+    // (downtime shows, but the count of incidents responsible for it is 0).
+    let incidents = spans.len() as i64;
 
     Ok(Json(json!({
         "uptime_pct": u.uptime_pct,

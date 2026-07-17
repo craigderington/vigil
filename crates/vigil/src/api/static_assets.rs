@@ -5,10 +5,13 @@
 //! standard single-page-app client-side-routing pattern.
 
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::set_status::SetStatus;
 
-pub fn service() -> ServeDir<SetStatus<ServeFile>> {
+pub fn service() -> ServeDir<ServeFile> {
     let dir = std::env::var("VIGIL_WEB_DIR").unwrap_or_else(|_| "/srv/web-dist".to_string());
     let index = format!("{dir}/index.html");
-    ServeDir::new(dir).not_found_service(ServeFile::new(index))
+    // `.fallback()` (not `.not_found_service()`, which wraps the fallback in
+    // `SetStatus` and forces every response through it to report 404) so a
+    // deep-linked client route like `/incidents` serves index.html with its
+    // natural 200, not a 404.
+    ServeDir::new(dir).fallback(ServeFile::new(index))
 }
