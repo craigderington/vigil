@@ -81,9 +81,15 @@ export function createMonitorStore() {
   refresh();
   const source = connect();
 
+  function monitorById(id: number | null | undefined) {
+    if (id == null) return undefined;
+    return state.monitors.find((m) => m.id === id);
+  }
+
   return {
     monitors: () => state.monitors,
     online: () => state.online,
+    monitorById,
     refresh,
     close: () => source.close(),
   };

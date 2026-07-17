@@ -1,9 +1,10 @@
-import { createMemo, createSignal, type Component } from "solid-js";
+import { createMemo, createSignal, Show, type Component } from "solid-js";
 import { createMonitorStore } from "./store";
 import Rail from "./components/Rail";
 import TopBar from "./components/TopBar";
 import ConnectivityBanner from "./components/ConnectivityBanner";
 import MonitorGrid from "./components/MonitorGrid";
+import DetailPanel from "./components/DetailPanel";
 
 const App: Component = () => {
   const store = createMonitorStore();
@@ -21,8 +22,12 @@ const App: Component = () => {
     });
   });
 
-  // Detail panel lands in Task 16; for now opening a monitor is a no-op.
-  const openMonitor = (_id: number) => {};
+  const [openMonitorId, setOpenMonitorId] = createSignal<number | null>(null);
+  // Re-derived from the live store on every read, so SSE updates to the
+  // open monitor (status flips, new response_time_ms, etc.) are reflected
+  // in the panel without a separate fetch or a stale snapshot.
+  const openMonitor = createMemo(() => store.monitorById(openMonitorId()));
+
   const addMonitor = () => {};
 
   return (
@@ -38,9 +43,12 @@ const App: Component = () => {
           onAdd={addMonitor}
         />
         <div class="app-content">
-          <MonitorGrid monitors={filtered()} onOpen={openMonitor} onChanged={store.refresh} />
+          <MonitorGrid monitors={filtered()} onOpen={setOpenMonitorId} onChanged={store.refresh} />
         </div>
       </div>
+      <Show when={openMonitor()}>
+        <DetailPanel monitor={openMonitor()} onClose={() => setOpenMonitorId(null)} />
+      </Show>
     </div>
   );
 };

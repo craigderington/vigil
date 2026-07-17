@@ -14,6 +14,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
   },
+  // Without this, solid-js resolves to its server (SSR) build under Vitest's
+  // Node environment, so client-only reactivity (onMount, createResource,
+  // etc.) throws "Client-only API called on the server side" in tests.
+  resolve: {
+    conditions: ["development", "browser"],
+  },
   test: {
     environment: "jsdom",
     globals: true,
