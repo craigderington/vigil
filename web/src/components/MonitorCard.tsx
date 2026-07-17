@@ -70,6 +70,17 @@ const MonitorCard: Component<MonitorCardProps> = (props) => {
     }
   }
 
+  // Live SSE response_time_ms wins when present; otherwise fall back to the
+  // 24h stats average so the card isn't blank until the monitor's first
+  // scheduled check (which can be up to `interval_seconds` after load).
+  function responseMs(): number | null {
+    const live = props.monitor.response_time_ms;
+    if (typeof live === "number") return live;
+    const avg = stats()?.avg_ms;
+    if (typeof avg === "number") return avg;
+    return null;
+  }
+
   return (
     // A native <button> can't legally contain the nested action <button>s
     // below (invalid HTML — browsers silently reparse it, breaking click
@@ -107,8 +118,8 @@ const MonitorCard: Component<MonitorCardProps> = (props) => {
 
       <div class="card-metrics">
         <span class="card-response mono">
-          <Show when={props.monitor.response_time_ms != null} fallback="—">
-            {props.monitor.response_time_ms}
+          <Show when={responseMs() != null} fallback="—">
+            {Math.round(responseMs() as number)}
             <span class="unit">ms</span>
           </Show>
         </span>
