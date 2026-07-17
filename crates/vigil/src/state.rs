@@ -45,14 +45,25 @@ pub fn evaluate(i: &Inputs) -> Decision {
         f = 0;
         let recovered = matches!(i.current, Status::Down)
             || (matches!(i.current, Status::Unknown) && matches!(i.prev_confirmed, Status::Down));
-        if recovered && s >= i.th.recovery {
-            return Decision {
-                next_status: Status::Up,
-                consecutive_failures: f,
-                consecutive_successes: s,
-                transition: Some(Transition::ToUpCloseIncident),
-                use_retry_interval: false,
-            };
+        if recovered {
+            if s >= i.th.recovery {
+                return Decision {
+                    next_status: Status::Up,
+                    consecutive_failures: f,
+                    consecutive_successes: s,
+                    transition: Some(Transition::ToUpCloseIncident),
+                    use_retry_interval: false,
+                };
+            } else {
+                // recovery not yet confirmed: keep the incident OPEN, stay DOWN, re-check fast
+                return Decision {
+                    next_status: Status::Down,
+                    consecutive_failures: f,
+                    consecutive_successes: s,
+                    transition: None,
+                    use_retry_interval: true,
+                };
+            }
         }
         let to_up_fresh = matches!(i.current, Status::Pending)
             || (matches!(i.current, Status::Unknown) && !matches!(i.prev_confirmed, Status::Down));
@@ -140,4 +151,20 @@ mod tests {
         assert_eq!(d.next_status,Down); assert_eq!(d.transition,None); }
     #[test] fn fail_while_offline_never_opens_incident() { let d=evaluate(&inp(Down,Down,2,0,false,Offline));
         assert_eq!(d.next_status,Unknown); assert_eq!(d.transition,Some(Transition::ToUnknown)); }
+    #[test] fn recovery_pending_stays_down_below_threshold() {
+        let mut i = inp(Down, Down, 3, 0, true, Online); i.th.recovery = 2;
+        let d = evaluate(&i);
+        assert_eq!(d.next_status, Down); assert_eq!(d.transition, None);
+        assert_eq!(d.consecutive_successes, 1); assert!(d.use_retry_interval);
+    }
+    #[test] fn recovery_confirmed_at_threshold() {
+        let mut i = inp(Down, Down, 0, 1, true, Online); i.th.recovery = 2; // s -> 2 == recovery
+        let d = evaluate(&i);
+        assert_eq!(d.next_status, Up); assert_eq!(d.transition, Some(Transition::ToUpCloseIncident));
+    }
+    #[test] fn unknown_prev_down_recovery_pending_stays_down() {
+        let mut i = inp(Unknown, Down, 0, 0, true, Online); i.th.recovery = 2; // s -> 1 < 2
+        let d = evaluate(&i);
+        assert_eq!(d.next_status, Down); assert_eq!(d.transition, None);
+    }
 }
