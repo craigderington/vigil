@@ -105,6 +105,8 @@ Each module has one job and a well-defined interface. Pure-logic modules (`state
 
 **Uptime is derived from incidents, never from counting raw `checks`.** Failed probes recorded during an UNKNOWN window (your-own-outage) never open an incident, so they never count as downtime. This sidesteps count-based corruption and matches the time-weighted formula in §10.3.
 
+**`prev_confirmed` is derived, not stored.** The state machine's `prev_confirmed` input (the last UP/DOWN before any UNKNOWN, needed to decide whether UNKNOWN→UP must close an incident) is **not** a column. It is derived at evaluation time from the presence of an **open (unresolved) incident** for that monitor: an open incident ⇒ `prev_confirmed = DOWN`; otherwise `UP` (or `PENDING` for a never-checked monitor). Because incidents persist across restarts, this derivation is correct after `docker compose restart` with no extra state.
+
 Every write emits `monitor:updated`; every state change also emits `monitor:transition` (and `incident:opened`/`incident:resolved`); connectivity changes emit `connectivity:changed`. SSE fans these to the browser, which patches only the affected card/panel. A config edit recomputes that monitor's queue entry immediately.
 
 ---
