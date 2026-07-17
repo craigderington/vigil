@@ -34,3 +34,23 @@ pub enum SchedCmd {
 pub fn router_health_only() -> axum::Router {
     axum::Router::new().route("/healthz", axum::routing::get(|| async { "ok" }))
 }
+
+/// The full application router: `/healthz`, the SSE event stream, the
+/// heartbeat receiver, the `/api/*` REST surface, and (as the fallback,
+/// for any unmatched GET) the built SPA's static assets.
+pub fn router(state: AppState) -> axum::Router {
+    axum::Router::new()
+        .route("/healthz", axum::routing::get(|| async { "ok" }))
+        .route("/events", axum::routing::get(crate::api::sse::sse_handler))
+        .route("/ping/:token", axum::routing::get(ping).post(ping))
+        .nest("/api", crate::api::routes())
+        .fallback_service(crate::api::static_assets::service())
+        .with_state(state)
+}
+
+/// `/ping/:token` — the heartbeat receiver. P1 wiring only: always 200, no
+/// token lookup or `last_ping_at` update yet (heartbeat monitors land in a
+/// later task).
+async fn ping() -> axum::http::StatusCode {
+    axum::http::StatusCode::OK
+}

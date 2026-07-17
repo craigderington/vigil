@@ -1,4 +1,6 @@
-use vigil::{app, config::Config};
+use std::sync::Arc;
+
+use vigil::{anchor::AnchorGate, app, config::Config, db, engine, maintenance, notify, scheduler, secrets, settings_store};
 
 #[tokio::main]
 async fn main() {
@@ -34,10 +36,40 @@ async fn healthcheck() {
     }
 }
 
-/// Bind `cfg.bind` and serve the router. For now this is `router_health_only()`;
-/// later tasks replace it with the full application router.
+/// Builds `AppState`, spawns the scheduler / anchor poller / connectivity
+/// reactor / maintenance background tasks, and serves the full application
+/// router on `cfg.bind`.
 async fn serve() {
     let cfg = Config::from_env();
+
+    let pool = match db::connect(&cfg.db_path).await {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("vigil: failed to open db {}: {err}", cfg.db_path);
+            std::process::exit(1);
+        }
+    };
+
+    let bus = tokio::sync::broadcast::channel(1024).0;
+    let transport = Arc::new(notify::SmtpTransport::new(secrets::read_smtp_password()));
+    let (sched_tx, sched_rx) = tokio::sync::mpsc::unbounded_channel();
+    let anchors = settings_store::anchors(&pool).await;
+    let anchor = Arc::new(AnchorGate::new(anchors, bus.clone()));
+
+    let state = app::AppState {
+        db: pool,
+        bus,
+        transport,
+        sched_tx,
+        anchor: anchor.clone(),
+    };
+
+    let sem = Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrency));
+    tokio::spawn(scheduler::run_scheduler(state.clone(), sched_rx, sem));
+    tokio::spawn(anchor.run_poller());
+    tokio::spawn(engine::run_connectivity_reactor(state.clone()));
+    tokio::spawn(maintenance::run(state.clone()));
+
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,
         Err(err) => {
@@ -46,7 +78,7 @@ async fn serve() {
         }
     };
     tracing::info!(bind = %cfg.bind, "vigil listening");
-    if let Err(err) = axum::serve(listener, app::router_health_only()).await {
+    if let Err(err) = axum::serve(listener, app::router(state)).await {
         eprintln!("vigil: server error: {err}");
         std::process::exit(1);
     }

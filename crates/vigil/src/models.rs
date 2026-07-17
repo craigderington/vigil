@@ -55,7 +55,7 @@ impl Trigger {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ProbeOutcome {
     pub ok: bool,
     pub response_time_ms: Option<i64>,
