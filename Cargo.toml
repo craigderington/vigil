@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/vigil"]
+resolver = "2"
