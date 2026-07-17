@@ -39,3 +39,29 @@ async fn offline_suppresses_alerts_and_keeps_incident_open() {
         .fetch_one(&env.state.db).await.unwrap();
     assert_eq!(open, 0, "offline never opens an incident");
 }
+#[tokio::test] async fn always_emits_monitor_updated_and_opens_incident() {
+    use vigil::events::Event;
+    let env = test_state().await;
+    let mid = seed_monitor_with_email_channel(&env.state.db).await;
+    sqlx::query("UPDATE monitors SET confirmation_threshold=1 WHERE id=?").bind(mid).execute(&env.state.db).await.unwrap();
+    let m: vigil::models::Monitor = sqlx::query_as("SELECT * FROM monitors WHERE id=?").bind(mid).fetch_one(&env.state.db).await.unwrap();
+    let mut rx = env.state.bus.subscribe();
+    let out = ProbeOutcome {
+        ok: false,
+        response_time_ms: Some(5),
+        status_code: Some(503),
+        error_message: None,
+        resolved_ip: None,
+        cause: Some(Cause::Status),
+    };
+    let ao = vigil::engine::apply_result(&env.state, &m, &out).await.unwrap(); // must be Ok
+    assert!(ao.incident_id.is_some());
+    // drain events, assert a MonitorUpdated with status Down was emitted
+    let mut saw_updated = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let Event::MonitorUpdated{ status: vigil::models::Status::Down, .. } = ev { saw_updated = true; }
+    }
+    assert!(saw_updated, "MonitorUpdated(Down) must always be emitted");
+    let open: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM incidents WHERE monitor_id=? AND resolved_at IS NULL").bind(mid).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(open, 1);
+}

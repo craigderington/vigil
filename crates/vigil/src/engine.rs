@@ -55,6 +55,14 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
     };
     let d = state::evaluate(&inputs);
 
+    // All persistence for this transition (status/streaks + incident
+    // open/close) happens in one transaction so a crash can never leave
+    // the monitor's status inconsistent with its incident row. Events and
+    // notifications are side effects that must happen only after a
+    // successful commit, and never while holding a write transaction open
+    // across a network call.
+    let mut tx = state.db.begin().await?;
+
     sqlx::query(
         "UPDATE monitors SET status = ?, consecutive_failures = ?, consecutive_successes = ?, \
          last_checked_at = ?, updated_at = ? WHERE id = ?",
@@ -65,12 +73,20 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
     .bind(now)
     .bind(now)
     .bind(m.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
     let mut incident_id: Option<i64> = None;
 
-    match d.transition {
+    enum PostCommit {
+        Opened { id: i64 },
+        Resolved { id: i64, duration_seconds: i64 },
+        NoIncident,
+        NoOpenIncidentFound,
+        None,
+    }
+
+    let post = match d.transition {
         Some(Transition::ToDownOpenIncident) => {
             let cause = match out.cause {
                 Some(Cause::Timeout) => "timeout",
@@ -88,18 +104,10 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
             .bind(cause)
             .bind(out.status_code)
             .bind(&out.error_message)
-            .fetch_one(&state.db)
+            .fetch_one(&mut *tx)
             .await?;
             incident_id = Some(id);
-
-            let _ = state.bus.send(Event::IncidentOpened { id, monitor_id: m.id });
-            let _ = state.bus.send(Event::MonitorTransition {
-                id: m.id,
-                from: m.status,
-                to: d.next_status,
-                incident_id,
-            });
-            dispatch::on_transition(state, m, Trigger::Down, incident_id).await?;
+            PostCommit::Opened { id }
         }
         Some(Transition::ToUpCloseIncident) => {
             let open: Option<(i64, i64)> = sqlx::query_as(
@@ -107,7 +115,7 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
                  ORDER BY started_at DESC LIMIT 1",
             )
             .bind(m.id)
-            .fetch_optional(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
 
             if let Some((id, started_at)) = open {
@@ -116,25 +124,53 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
                     .bind(now)
                     .bind(dur)
                     .bind(id)
-                    .execute(&state.db)
+                    .execute(&mut *tx)
                     .await?;
                 incident_id = Some(id);
-
-                let _ = state.bus.send(Event::IncidentResolved {
-                    id,
-                    monitor_id: m.id,
-                    duration_seconds: dur,
-                });
-                let _ = state.bus.send(Event::MonitorTransition {
-                    id: m.id,
-                    from: m.status,
-                    to: d.next_status,
-                    incident_id,
-                });
-                dispatch::on_transition(state, m, Trigger::Recovered, incident_id).await?;
+                PostCommit::Resolved { id, duration_seconds: dur }
+            } else {
+                PostCommit::NoOpenIncidentFound
             }
         }
-        Some(Transition::ToUpNoIncident) | Some(Transition::ToUnknown) => {
+        Some(Transition::ToUpNoIncident) | Some(Transition::ToUnknown) => PostCommit::NoIncident,
+        None => PostCommit::None,
+    };
+
+    tx.commit().await?;
+
+    // From here on, persistence has already succeeded: no `?` may skip the
+    // unconditional MonitorUpdated emission or the Ok(ApplyOutcome) return
+    // below. Notify-dispatch errors are logged, not propagated (Fix 1).
+    match post {
+        PostCommit::Opened { id } => {
+            let _ = state.bus.send(Event::IncidentOpened { id, monitor_id: m.id });
+            let _ = state.bus.send(Event::MonitorTransition {
+                id: m.id,
+                from: m.status,
+                to: d.next_status,
+                incident_id,
+            });
+            if let Err(e) = dispatch::on_transition(state, m, Trigger::Down, incident_id).await {
+                tracing::warn!(monitor_id = m.id, error = %e, "notify dispatch (down) failed");
+            }
+        }
+        PostCommit::Resolved { id, duration_seconds } => {
+            let _ = state.bus.send(Event::IncidentResolved {
+                id,
+                monitor_id: m.id,
+                duration_seconds,
+            });
+            let _ = state.bus.send(Event::MonitorTransition {
+                id: m.id,
+                from: m.status,
+                to: d.next_status,
+                incident_id,
+            });
+            if let Err(e) = dispatch::on_transition(state, m, Trigger::Recovered, incident_id).await {
+                tracing::warn!(monitor_id = m.id, error = %e, "notify dispatch (recovered) failed");
+            }
+        }
+        PostCommit::NoIncident => {
             let _ = state.bus.send(Event::MonitorTransition {
                 id: m.id,
                 from: m.status,
@@ -142,7 +178,10 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
                 incident_id: None,
             });
         }
-        None => {}
+        PostCommit::NoOpenIncidentFound => {
+            tracing::warn!(monitor_id = m.id, "ToUpCloseIncident but no open incident found");
+        }
+        PostCommit::None => {}
     }
 
     let _ = state.bus.send(Event::MonitorUpdated {
@@ -161,14 +200,20 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
 /// connection itself is down, so alerting is suppressed fleet-wide.
 pub async fn bulk_set_unknown(state: &AppState) -> anyhow::Result<()> {
     let now = now();
+
+    // The captured "old status" snapshot must be consistent with the rows
+    // actually flipped to unknown, so both queries run in one transaction.
+    // Events are emitted only after a successful commit.
+    let mut tx = state.db.begin().await?;
     let rows: Vec<(i64, String)> =
         sqlx::query_as("SELECT id, status FROM monitors WHERE is_paused = 0 AND status != 'unknown'")
-            .fetch_all(&state.db)
+            .fetch_all(&mut *tx)
             .await?;
 
     sqlx::query("UPDATE monitors SET status = 'unknown' WHERE is_paused = 0 AND status != 'unknown'")
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     for (id, old) in rows {
         let _ = state.bus.send(Event::MonitorTransition {
