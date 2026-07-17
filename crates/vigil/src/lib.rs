@@ -5,6 +5,7 @@ pub mod cooldown;
 pub mod db;
 pub mod events;
 pub mod models;
+pub mod probe;
 pub mod state;
 pub mod status_codes;
 pub mod uptime;
