@@ -5,6 +5,12 @@
 
 use std::sync::{Arc, Mutex};
 
+pub mod dispatch;
+pub mod email;
+pub mod templates;
+
+pub use email::SmtpTransport;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmailMsg {
     pub to: Vec<String>,
@@ -26,6 +32,7 @@ pub trait Transport: Send + Sync {
     async fn send(&self, cfg: &SmtpConfig, msg: &EmailMsg) -> anyhow::Result<()>;
 }
 
+#[derive(Clone, Debug)]
 pub struct TemplateCtx {
     pub monitor_name: String,
     pub url: String,

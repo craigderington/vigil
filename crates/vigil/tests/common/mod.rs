@@ -41,6 +41,46 @@ pub fn test_http_monitor(url: &str, codes: &str) -> Monitor {
     m
 }
 
+/// Seeds a monitor, an active `email` notification channel, and a
+/// `monitor_notifications` attachment (triggers: down, recovered). Returns
+/// the monitor id.
+pub async fn seed_monitor_with_email_channel(pool: &sqlx::SqlitePool) -> i64 {
+    let now = 1_700_000_000i64;
+    let mid: i64 = sqlx::query_scalar(
+        "INSERT INTO monitors (name, type, url, created_at, updated_at) VALUES (?, 'http', ?, ?, ?) RETURNING id",
+    )
+    .bind("seed")
+    .bind("https://x")
+    .bind(now)
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    let config = r#"{"host":"h","port":25,"security":"none","from":"f@b","to":["a@b"]}"#;
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO notification_channels (name, type, config, is_active, created_at) VALUES (?, 'email', ?, 1, ?) RETURNING id",
+    )
+    .bind("seed-channel")
+    .bind(config)
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO monitor_notifications (monitor_id, channel_id, triggers) VALUES (?, ?, ?)",
+    )
+    .bind(mid)
+    .bind(cid)
+    .bind(r#"["down","recovered"]"#)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    mid
+}
+
 pub fn ctx_with(name: &str, url: &str, code: Option<i64>) -> TemplateCtx {
     TemplateCtx {
         monitor_name: name.into(),
