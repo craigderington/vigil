@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod cooldown;
 pub mod db;
 pub mod models;
 pub mod state;
