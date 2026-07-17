@@ -15,13 +15,17 @@ pub struct AppState {
 }
 
 /// Commands sent to the scheduler task: recompute a monitor's schedule
-/// (created/updated), drop it (deleted/paused), or run it immediately
-/// (`check_now`).
+/// (created/updated), drop it (deleted/paused), run it immediately
+/// (`check_now`), or signal that a worker has finished a check
+/// (`Complete`, sent exactly once per `worker::run_check` invocation so the
+/// scheduler can clear its in-flight guard and allow the monitor to be
+/// scheduled again).
 #[derive(Clone, Copy, Debug)]
 pub enum SchedCmd {
     Upsert(i64),
     Remove(i64),
     CheckNow(i64),
+    Complete(i64),
 }
 
 /// A router exposing only `/healthz`. Used by the Docker `HEALTHCHECK`

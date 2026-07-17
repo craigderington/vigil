@@ -1,6 +1,13 @@
 //! One probe-and-reschedule cycle for a single monitor: probe → record the
 //! raw `checks` row → run it through `engine::apply_result` → compute and
-//! persist the next `next_run_at` → tell the scheduler to re-heap.
+//! persist the next `next_run_at` → tell the scheduler the check completed.
+//!
+//! Every exit path — monitor missing, monitor paused, or the normal
+//! probe/apply/reschedule flow (including an `apply_result` error) — sends
+//! exactly one `SchedCmd::Complete(id)` before returning. The scheduler's
+//! in-flight guard (`SchedState`) depends on that: a monitor that fires
+//! without ever completing would stay marked in-flight forever and never
+//! be scheduled again.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,8 +22,18 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 
-/// Runs a single check for `monitor_id`. Silently returns (logging as
-/// appropriate) if the monitor was deleted or paused between being
+/// Signals the scheduler that this monitor's check finished, so it can
+/// clear the in-flight guard (and, seeing the monitor paused/missing/its
+/// freshly-persisted `next_run_at`, decide whether/when to re-heap it).
+/// Send errors are ignored: no scheduler task is running in some tests, and
+/// a closed channel just means "nothing to re-heap" — not a failure of the
+/// check itself.
+fn signal_complete(state: &AppState, monitor_id: i64) {
+    let _ = state.sched_tx.send(SchedCmd::Complete(monitor_id));
+}
+
+/// Runs a single check for `monitor_id`. Returns early (after signaling
+/// completion) if the monitor was deleted or paused between being
 /// scheduled and firing — that's a normal race, not an error.
 pub async fn run_check(state: &AppState, monitor_id: i64) {
     let m: Option<Monitor> = sqlx::query_as("SELECT * FROM monitors WHERE id = ?")
@@ -26,8 +43,12 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
         .ok()
         .flatten();
 
-    let Some(m) = m else { return };
+    let Some(m) = m else {
+        signal_complete(state, monitor_id);
+        return;
+    };
     if m.is_paused {
+        signal_complete(state, monitor_id);
         return;
     }
 
@@ -52,15 +73,18 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
         tracing::error!(monitor_id, error = %e, "failed to insert check row");
     }
 
-    let ao = match engine::apply_result(state, &m, &out).await {
-        Ok(a) => a,
+    // On an apply_result error, don't drop the monitor from the schedule —
+    // treat it as "retry soon" (use_retry_interval = true) rather than
+    // silently returning without ever rescheduling it.
+    let use_retry_interval = match engine::apply_result(state, &m, &out).await {
+        Ok(a) => a.use_retry_interval,
         Err(e) => {
-            tracing::error!(monitor_id, error = %e, "apply_result failed");
-            return;
+            tracing::error!(monitor_id, error = %e, "apply_result failed; retrying soon");
+            true
         }
     };
 
-    let base = if ao.use_retry_interval { m.retry_interval_seconds } else { m.interval_seconds };
+    let base = if use_retry_interval { m.retry_interval_seconds } else { m.interval_seconds };
     let next = scheduler::next_run_with_jitter(now, base);
 
     if let Err(e) = sqlx::query("UPDATE monitors SET next_run_at = ? WHERE id = ?")
@@ -72,8 +96,5 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
         tracing::error!(monitor_id, error = %e, "failed to persist next_run_at");
     }
 
-    // Ignored: no scheduler task is running in some tests, and a closed
-    // channel just means "nothing to re-heap" — not a failure of the check
-    // itself, which has already been recorded and applied above.
-    let _ = state.sched_tx.send(SchedCmd::Upsert(monitor_id));
+    signal_complete(state, monitor_id);
 }
