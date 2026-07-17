@@ -24,6 +24,9 @@ pub fn parse_expected(spec: &str) -> Result<Vec<(u16, u16)>, String> {
                 let end = parts[1]
                     .parse::<u16>()
                     .map_err(|_| format!("Invalid end in range: {}", token))?;
+                if start > end {
+                    return Err(format!("Invalid range (start > end): {}", token));
+                }
                 Ok((start, end))
             } else {
                 let code = token
@@ -67,5 +70,11 @@ mod tests {
     fn default_2xx() {
         let r = parse_expected("200-299").unwrap();
         assert!(matches(&r, 204) && !matches(&r, 199));
+    }
+
+    #[test]
+    fn rejects_reversed_range() {
+        assert!(parse_expected("299-200").is_err());
+        assert!(parse_expected("200-299").is_ok()); // forward range still fine
     }
 }
