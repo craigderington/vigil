@@ -5,6 +5,7 @@ export interface DetailPanelProps {
   monitor: any;
   onClose: () => void;
   onEdit?: (monitor: any) => void;
+  onChanged?: () => void;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -59,12 +60,12 @@ function absoluteFrom(epochSeconds: number | null | undefined): string | undefin
 }
 
 /**
- * A single uptime-range tile. `nullText` is the primary/hero tile's bare
- * dash ("—") for the 24h tile, and a slightly more descriptive "No data"
- * for the 7d tile — deliberately different strings (not just differently
- * styled) so a monitor with no data in *either* range never renders two
- * DOM nodes with identical text; anything sighted or assistive-tech users
- * rely on to distinguish "which tile is this" stays unambiguous too.
+ * A single uptime-range tile. `nullText` is dash-based for both the 24h
+ * and 7d tiles, matching `MonitorCard`'s `"— · 24h"` convention — but the
+ * label is baked into the string ("— · 24h" / "— · 7d") so the two tiles
+ * never render identical DOM text even when both are null at once; that
+ * keeps `findByText` (and anyone visually scanning the panel) unambiguous
+ * about which tile is which.
  */
 const UptimeTile: Component<{
   label: string;
@@ -110,12 +111,19 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
       await fn();
     } finally {
       setBusy(false);
+      props.onChanged?.();
     }
   }
 
   async function handleDelete() {
-    await runAction(() => api.deleteMonitor(props.monitor.id));
-    props.onClose();
+    setBusy(true);
+    try {
+      await api.deleteMonitor(props.monitor.id);
+    } finally {
+      setBusy(false);
+      props.onChanged?.();
+      props.onClose();
+    }
   }
 
   // Live SSE response_time_ms wins when present; otherwise fall back to the
@@ -221,8 +229,8 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
           </div>
 
           <div class="uptime-tiles">
-            <UptimeTile label="24h" monitorId={props.monitor.id} range="24h" nullText="—" />
-            <UptimeTile label="7d" monitorId={props.monitor.id} range="7d" nullText="No data" />
+            <UptimeTile label="24h" monitorId={props.monitor.id} range="24h" nullText="— · 24h" />
+            <UptimeTile label="7d" monitorId={props.monitor.id} range="7d" nullText="— · 7d" />
           </div>
 
           <details class="detail-config">

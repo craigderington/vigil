@@ -47,7 +47,11 @@ const App: Component = () => {
         </div>
       </div>
       <Show when={openMonitor()}>
-        <DetailPanel monitor={openMonitor()} onClose={() => setOpenMonitorId(null)} />
+        <DetailPanel
+          monitor={openMonitor()}
+          onClose={() => setOpenMonitorId(null)}
+          onChanged={store.refresh}
+        />
       </Show>
     </div>
   );
