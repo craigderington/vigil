@@ -1,0 +1,206 @@
+//! Ties the pure state machine (`state::evaluate`) to persistence, events,
+//! and notifications: `apply_result` runs one probe outcome through the
+//! machine and updates the world accordingly; `bulk_set_unknown` +
+//! `run_connectivity_reactor` implement the fleet-wide UNKNOWN reaction to
+//! a lost anchor (the internet-sanity gate going offline).
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::app::AppState;
+use crate::events::Event;
+use crate::models::{Cause, Monitor, ProbeOutcome, Status, Trigger};
+use crate::notify::dispatch;
+use crate::state::{self, Transition};
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+pub struct ApplyOutcome {
+    pub incident_id: Option<i64>,
+    pub use_retry_interval: bool,
+}
+
+/// Runs one probe outcome through the state machine, persists the new
+/// status/streaks, opens or closes an incident as the transition demands,
+/// emits the corresponding events, and dispatches down/recovered
+/// notifications. Does **not** touch `next_run_at` — the worker (Task 13)
+/// owns scheduling.
+pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> anyhow::Result<ApplyOutcome> {
+    let now = now();
+    let anchor = state.anchor.current().await;
+
+    let has_open: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL",
+    )
+    .bind(m.id)
+    .fetch_one(&state.db)
+    .await?;
+    let prev = if has_open > 0 { Status::Down } else { Status::Up };
+
+    let inputs = state::Inputs {
+        current: m.status,
+        prev_confirmed: prev,
+        consecutive_failures: m.consecutive_failures,
+        consecutive_successes: m.consecutive_successes,
+        outcome_ok: out.ok,
+        anchor,
+        th: state::Thresholds {
+            confirmation: m.confirmation_threshold,
+            recovery: m.recovery_threshold,
+        },
+    };
+    let d = state::evaluate(&inputs);
+
+    sqlx::query(
+        "UPDATE monitors SET status = ?, consecutive_failures = ?, consecutive_successes = ?, \
+         last_checked_at = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(d.next_status.as_str())
+    .bind(d.consecutive_failures)
+    .bind(d.consecutive_successes)
+    .bind(now)
+    .bind(now)
+    .bind(m.id)
+    .execute(&state.db)
+    .await?;
+
+    let mut incident_id: Option<i64> = None;
+
+    match d.transition {
+        Some(Transition::ToDownOpenIncident) => {
+            let cause = match out.cause {
+                Some(Cause::Timeout) => "timeout",
+                Some(Cause::Status) => "status",
+                Some(Cause::Connection) => "connection",
+                Some(Cause::Dns) => "dns",
+                None => "connection",
+            };
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO incidents (monitor_id, started_at, cause, status_code, error_message) \
+                 VALUES (?, ?, ?, ?, ?) RETURNING id",
+            )
+            .bind(m.id)
+            .bind(now)
+            .bind(cause)
+            .bind(out.status_code)
+            .bind(&out.error_message)
+            .fetch_one(&state.db)
+            .await?;
+            incident_id = Some(id);
+
+            let _ = state.bus.send(Event::IncidentOpened { id, monitor_id: m.id });
+            let _ = state.bus.send(Event::MonitorTransition {
+                id: m.id,
+                from: m.status,
+                to: d.next_status,
+                incident_id,
+            });
+            dispatch::on_transition(state, m, Trigger::Down, incident_id).await?;
+        }
+        Some(Transition::ToUpCloseIncident) => {
+            let open: Option<(i64, i64)> = sqlx::query_as(
+                "SELECT id, started_at FROM incidents WHERE monitor_id = ? AND resolved_at IS NULL \
+                 ORDER BY started_at DESC LIMIT 1",
+            )
+            .bind(m.id)
+            .fetch_optional(&state.db)
+            .await?;
+
+            if let Some((id, started_at)) = open {
+                let dur = now - started_at;
+                sqlx::query("UPDATE incidents SET resolved_at = ?, duration_seconds = ? WHERE id = ?")
+                    .bind(now)
+                    .bind(dur)
+                    .bind(id)
+                    .execute(&state.db)
+                    .await?;
+                incident_id = Some(id);
+
+                let _ = state.bus.send(Event::IncidentResolved {
+                    id,
+                    monitor_id: m.id,
+                    duration_seconds: dur,
+                });
+                let _ = state.bus.send(Event::MonitorTransition {
+                    id: m.id,
+                    from: m.status,
+                    to: d.next_status,
+                    incident_id,
+                });
+                dispatch::on_transition(state, m, Trigger::Recovered, incident_id).await?;
+            }
+        }
+        Some(Transition::ToUpNoIncident) | Some(Transition::ToUnknown) => {
+            let _ = state.bus.send(Event::MonitorTransition {
+                id: m.id,
+                from: m.status,
+                to: d.next_status,
+                incident_id: None,
+            });
+        }
+        None => {}
+    }
+
+    let _ = state.bus.send(Event::MonitorUpdated {
+        id: m.id,
+        status: d.next_status,
+        response_time_ms: out.response_time_ms,
+        checked_at: now,
+    });
+
+    Ok(ApplyOutcome { incident_id, use_retry_interval: d.use_retry_interval })
+}
+
+/// Flips every non-paused monitor not already `unknown` into `UNKNOWN`
+/// (the connectivity-lost state), emitting a transition + update event per
+/// affected monitor. Used when the anchor gate reports the local
+/// connection itself is down, so alerting is suppressed fleet-wide.
+pub async fn bulk_set_unknown(state: &AppState) -> anyhow::Result<()> {
+    let now = now();
+    let rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, status FROM monitors WHERE is_paused = 0 AND status != 'unknown'")
+            .fetch_all(&state.db)
+            .await?;
+
+    sqlx::query("UPDATE monitors SET status = 'unknown' WHERE is_paused = 0 AND status != 'unknown'")
+        .execute(&state.db)
+        .await?;
+
+    for (id, old) in rows {
+        let _ = state.bus.send(Event::MonitorTransition {
+            id,
+            from: Status::from_db(&old),
+            to: Status::Unknown,
+            incident_id: None,
+        });
+        let _ = state.bus.send(Event::MonitorUpdated {
+            id,
+            status: Status::Unknown,
+            response_time_ms: None,
+            checked_at: now,
+        });
+    }
+
+    Ok(())
+}
+
+/// Background task: listens for `ConnectivityChanged { online: false }`
+/// and reacts by marking the whole fleet `UNKNOWN`. Runs for the lifetime
+/// of the app; exits only when the bus itself is closed.
+pub async fn run_connectivity_reactor(state: AppState) {
+    let mut rx = state.bus.subscribe();
+    loop {
+        match rx.recv().await {
+            Ok(Event::ConnectivityChanged { online: false }) => {
+                let _ = bulk_set_unknown(&state).await;
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+        }
+    }
+}

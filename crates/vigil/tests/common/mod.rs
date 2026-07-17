@@ -34,6 +34,26 @@ pub async fn test_state() -> TestEnv {
     TestEnv { state, sent, _rx: rx, _dir: dir }
 }
 
+/// Same as `test_state`, but the anchor gate is wired to a prober that
+/// always reports unreachable, and probed once up front so `current()`
+/// returns `Offline` immediately (no TTL-driven re-probe needed).
+pub async fn test_state_offline() -> TestEnv {
+    let (pool, dir) = fresh_pool().await;
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let (bus, _busrx) = tokio::sync::broadcast::channel(64);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let anchor = Arc::new(vigil::anchor::AnchorGate::with_prober(bus.clone(), Box::new(|| false)));
+    anchor.probe_and_update().await;
+    let state = AppState {
+        db: pool,
+        bus,
+        transport: Arc::new(RecordingTransport { sent: sent.clone() }),
+        sched_tx: tx,
+        anchor,
+    };
+    TestEnv { state, sent, _rx: rx, _dir: dir }
+}
+
 pub fn test_http_monitor(url: &str, codes: &str) -> Monitor {
     let mut m = vigil::models::test_defaults_monitor();
     m.url = Some(url.into());

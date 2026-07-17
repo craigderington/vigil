@@ -3,6 +3,7 @@ pub mod app;
 pub mod config;
 pub mod cooldown;
 pub mod db;
+pub mod engine;
 pub mod events;
 pub mod models;
 pub mod notify;
