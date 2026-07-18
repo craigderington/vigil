@@ -12,7 +12,13 @@ export function applyEvent(s: StoreState, ev: StoreEvent): StoreState {
 
     case "monitor_updated": {
       const { id, ...patch } = ev.data;
-      return { ...s, monitors: patchMonitor(s.monitors, id, patch) };
+      // The SSE frame carries `checked_at`, but the Monitor model / detail
+      // panel read `last_checked_at` — merge it across so "Last checked"
+      // updates live instead of staying stale until the next full refresh.
+      return {
+        ...s,
+        monitors: patchMonitor(s.monitors, id, { ...patch, last_checked_at: ev.data.checked_at }),
+      };
     }
 
     case "monitor_transition": {

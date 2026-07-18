@@ -101,10 +101,18 @@ impl SchedState {
         }
     }
 
-    /// Delete/pause: drop from heap and clear any in-flight marker.
+    /// Delete/pause: drop from the heap only. Deliberately does NOT clear
+    /// `in_flight` — if a worker is mid-probe for this id, the marker must
+    /// survive a pause→resume (Remove then Upsert/schedule) so `take_due`
+    /// keeps refusing to hand out a second concurrent `worker::run_check`
+    /// for the same monitor. Only `SchedCmd::Complete` (sent exactly once,
+    /// on every `run_check` exit path) is allowed to clear it. For the
+    /// delete case, the in-flight worker's `apply_result` UPDATEs 0 rows on
+    /// the now-deleted monitor, and its subsequent Complete →
+    /// `reschedule_from_db` sees `Ok(None)` and drops it — so no stale
+    /// in-flight marker lingers forever.
     pub fn remove(&mut self, id: i64) {
         self.heap = self.heap.drain().filter(|Reverse((_, hid))| *hid != id).collect();
-        self.in_flight.remove(&id);
     }
 }
 
@@ -260,5 +268,18 @@ mod tests {
         s.schedule(1, 0);
         s.remove(1);
         assert_eq!(s.take_due(100), None);
+    }
+
+    #[test]
+    fn remove_does_not_clear_in_flight_no_double_fire() {
+        let mut s = SchedState::new();
+        s.schedule(1, 0);
+        assert_eq!(s.take_due(10), Some(1)); // in-flight
+        s.remove(1); // pause/delete while a worker is running
+        s.schedule(1, 0); // resume / re-add
+        assert_eq!(s.take_due(10), None, "must NOT double-fire an in-flight monitor after remove+reschedule");
+        s.complete(1);
+        s.schedule(1, 0); // worker finished
+        assert_eq!(s.take_due(10), Some(1), "safe to run again after Complete");
     }
 }

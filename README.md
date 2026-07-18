@@ -81,6 +81,14 @@ your LAN if you publish the port on a non-loopback host interface) and has
 single-operator tool — put it behind a reverse proxy, VPN, or firewall rule
 if it needs to be reachable from anywhere less trusted than your home/LAN.
 
+**HTTP monitor auth secrets:** an `auth_ref` of `inline:<value>` stores the
+literal bearer token / basic-auth password in the SQLite database, and that
+value **is returned as-is by `GET /api/monitors`** over the unauthenticated
+LAN API described above. Prefer `env:VAR_NAME` instead — it resolves the
+secret from the container's environment at probe time and is never written
+to the database or returned by the API. Reserve `inline:` for throwaway/
+non-sensitive values.
+
 ## Development
 
 - Backend: Rust workspace at `crates/vigil` (binary `vigil`, subcommands
