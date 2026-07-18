@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio_rustls::rustls::{self, ServerConfig};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime};
+use tokio_rustls::rustls::{self, RootCertStore, ServerConfig};
 
 use vigil::certcheck::ssl;
 
@@ -108,6 +108,53 @@ async fn local_self_signed_cert() {
     assert!(
         result.valid_until.unwrap() > now_epoch(),
         "freshly minted cert should not be expired"
+    );
+}
+
+// ---- verify_chain: chain_ok decoupled from hostname_match (Finding 1) ----
+
+/// Proves `chain_ok` and `hostname_match` are independent facts, entirely
+/// offline (no network, no real TLS handshake): a self-signed cert added to
+/// a `RootCertStore` *as its own trust anchor* verifies as chain-trusted
+/// via `ssl::verify_chain` — while that same cert's SAN (`localhost`)
+/// plainly does not match an unrelated hostname (`127.0.0.1`) per
+/// `ssl::hostname_matches`. A chain-trusted-but-wrong-hostname cert must
+/// read as `chain_ok: true, hostname_match: false`, never as a broken
+/// chain — this is the real regression guard for Finding 1 (previously,
+/// `chain_ok` was computed via `WebPkiServerVerifier::verify_server_cert`,
+/// which checks chain trust *and* hostname in one pass, so a wrong-host
+/// cert always read as `chain_ok: false` even when genuinely CA-trusted).
+#[test]
+fn verify_chain_is_independent_of_hostname() {
+    let rcgen::CertifiedKey { cert, .. } =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed cert");
+    let cert_der: CertificateDer<'static> = cert.der().clone();
+
+    let provider = rustls::crypto::ring::default_provider();
+
+    // The leaf IS the trust anchor: a self-signed cert added to its own
+    // RootCertStore must verify as chain-trusted, with zero intermediates.
+    let mut own_root = RootCertStore::empty();
+    own_root.add(cert_der.clone()).expect("self-signed cert is a well-formed trust anchor");
+    assert!(
+        ssl::verify_chain(&cert_der, &[], &own_root, UnixTime::now(), &provider),
+        "a self-signed cert trusted as its own root anchor must chain-verify"
+    );
+
+    // Same cert, checked against a hostname NOT in its SANs: this must be
+    // false, but must NOT have influenced the chain_ok result above.
+    assert!(
+        !ssl::hostname_matches(&["localhost".to_string()], None, "127.0.0.1"),
+        "the cert's SAN (localhost) does not match 127.0.0.1"
+    );
+
+    // Same cert, checked against an unrelated (empty) root store: this
+    // must be false — proving verify_chain isn't vacuously true.
+    let unrelated_roots = RootCertStore::empty();
+    assert!(
+        !ssl::verify_chain(&cert_der, &[], &unrelated_roots, UnixTime::now(), &provider),
+        "a root store that doesn't contain the cert (or its issuer) must not trust it"
     );
 }
 

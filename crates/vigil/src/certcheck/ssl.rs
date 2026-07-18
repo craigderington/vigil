@@ -15,10 +15,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use tokio_rustls::rustls::client::verify_server_cert_signed_by_trust_anchor;
 use tokio_rustls::rustls::crypto::CryptoProvider;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::server::ParsedCertificate;
 use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use x509_parser::prelude::*;
 
@@ -137,6 +138,36 @@ fn pattern_matches(pattern: &str, host_lower: &str) -> bool {
     }
 }
 
+/// Chain-only trust verification: does `leaf` (with `intermediates`) chain
+/// to a trust anchor in `roots` as of `now`? Deliberately independent of
+/// hostname — unlike `WebPkiServerVerifier::verify_server_cert` (which
+/// checks chain-trust *and* hostname in one pass, via an internal
+/// `verify_server_name` call), `verify_server_cert_signed_by_trust_anchor`
+/// takes no `ServerName` at all, so this result can never be conflated with
+/// `hostname_match`. `SslResult.chain_ok` and `SslResult.hostname_match`
+/// are separate facts about the certificate and must be computed
+/// independently — a CA-trusted cert served for the wrong hostname is a
+/// hostname problem, not a broken chain.
+pub fn verify_chain(
+    leaf: &CertificateDer<'_>,
+    intermediates: &[CertificateDer<'_>],
+    roots: &RootCertStore,
+    now: UnixTime,
+    provider: &CryptoProvider,
+) -> bool {
+    let Ok(parsed) = ParsedCertificate::try_from(leaf) else {
+        return false;
+    };
+    verify_server_cert_signed_by_trust_anchor(
+        &parsed,
+        roots,
+        intermediates,
+        now,
+        provider.signature_verification_algorithms.all,
+    )
+    .is_ok()
+}
+
 /// Runs a TLS handshake against `host:port` (SNI = `host`), captures the
 /// served certificate chain, and reports what it found. Never panics on
 /// network/parse failure — any connect/handshake/parse error yields a
@@ -194,7 +225,10 @@ pub async fn check(host: &str, port: u16, timeout_secs: u64) -> SslResult {
     let subject = leaf.subject().to_string();
     let valid_from = leaf.validity().not_before.timestamp();
     let valid_until = leaf.validity().not_after.timestamp();
-    let days_remaining = (valid_until - now_epoch()) / 86_400;
+    // Floor division (not truncation) so a cert that expired within the
+    // last 24h reports a negative `days_remaining` instead of `0` — `0`
+    // would misleadingly read as "still valid, expires today."
+    let days_remaining = (valid_until - now_epoch()).div_euclid(86_400);
 
     let sans: Vec<String> = leaf
         .subject_alternative_name()
@@ -216,23 +250,14 @@ pub async fn check(host: &str, port: u16, timeout_secs: u64) -> SslResult {
 
     let self_signed = issuer == subject || chain.len() == 1;
 
-    // Chain trust against the Mozilla root store, via the explicit ring
-    // provider (NOT the bare `builder()`, whose provider resolves from
-    // crate features and would panic if a second crypto provider ever
-    // leaked into the build). Note `verify_server_cert` also re-checks the
-    // hostname internally (it's a single webpki pass over chain + name),
-    // so a wrong-host-but-CA-trusted cert reads as `chain_ok: false` here
-    // even though `hostname_match` alone would say the SAN just doesn't
-    // fit — `chain_ok` in this implementation therefore means "fully
-    // webpki-valid for `host`", not "chain-to-root only".
+    // Chain trust against the Mozilla root store, computed independently
+    // of hostname via `verify_chain` (see its doc comment) — using the
+    // explicit ring provider (NOT the bare `builder()`, whose provider
+    // resolves from crate features and would panic if a second crypto
+    // provider ever leaked into the build).
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let chain_ok = match WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build() {
-        Ok(verifier) => verifier
-            .verify_server_cert(leaf_der, &chain[1..], &server_name, &[], UnixTime::now())
-            .is_ok(),
-        Err(_) => false,
-    };
+    let chain_ok = verify_chain(leaf_der, &chain[1..], &roots, UnixTime::now(), &provider);
 
     let now = now_epoch();
     let is_valid = now >= valid_from && now <= valid_until && chain_ok && hostname_match;
