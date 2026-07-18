@@ -79,6 +79,16 @@ button{font-family:inherit;color:inherit}
 }
 .btn-accent:hover{filter:brightness(1.08)}
 
+/* ---------- Layout toggle (grid ⇄ list) ---------- */
+.layout-toggle{display:flex;gap:2px;background:var(--bg-surface);border:1px solid var(--border-default);border-radius:var(--r-md);padding:2px}
+.layout-btn{
+  width:30px;height:28px;display:flex;align-items:center;justify-content:center;
+  background:transparent;border:none;border-radius:var(--r-sm);color:var(--text-tertiary);
+  font-size:14px;cursor:pointer;
+}
+.layout-btn:hover{color:var(--text-primary)}
+.layout-btn[aria-pressed="true"]{background:var(--bg-surface-3);color:var(--accent)}
+
 /* ---------- Monitor grid ---------- */
 .monitor-grid{
   display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;
@@ -150,6 +160,36 @@ button{font-family:inherit;color:inherit}
 }
 .card-menu button:hover{background:var(--bg-surface-2)}
 .card-menu button.danger{color:var(--down)}
+
+/* ---------- List view (dense table, spec §11.4) ---------- */
+.list-view{overflow-x:auto}
+.monitor-table{width:100%;border-collapse:collapse;font-size:13px}
+.monitor-table thead th{
+  text-align:left;color:var(--text-tertiary);font-size:11px;font-weight:600;
+  text-transform:uppercase;letter-spacing:.06em;padding:0 10px 8px;
+  border-bottom:1px solid var(--border-default);white-space:nowrap;
+}
+.monitor-table th.align-right,.monitor-table td.align-right{text-align:right}
+.th-sort-btn{
+  background:transparent;border:none;color:inherit;font:inherit;text-transform:inherit;
+  letter-spacing:inherit;cursor:pointer;padding:0;display:inline-flex;align-items:center;gap:4px;
+}
+.th-sort-btn:hover{color:var(--text-primary)}
+.sort-arrow{font-size:9px;color:var(--accent)}
+.monitor-table td{padding:10px;border-bottom:1px solid var(--border-subtle);vertical-align:middle}
+.list-row{cursor:pointer;transition:background 120ms ease-out}
+.list-row:hover{background:var(--bg-surface-2)}
+.list-row:focus-visible{outline:2px solid var(--focus-ring);outline-offset:-2px}
+.col-status{width:1%}
+.col-name{font-weight:600;color:var(--text-primary);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.col-type{
+  text-transform:uppercase;letter-spacing:.06em;font-size:10px;font-weight:600;
+  color:var(--text-secondary);
+}
+.col-lastcheck{color:var(--text-secondary)}
+.col-bar{width:180px}
+.col-menu{position:relative;width:1%;text-align:right}
+.list-menu{top:36px;right:8px}
 
 /* ---------- Detail panel ---------- */
 .detail-backdrop{

@@ -1,4 +1,4 @@
-import { For, type Component } from "solid-js";
+import { For, Show, type Component } from "solid-js";
 
 export interface TopBarProps {
   query: string;
@@ -6,6 +6,10 @@ export interface TopBarProps {
   statusFilter: string | null;
   onStatusFilterChange: (s: string | null) => void;
   onAdd: () => void;
+  /** Grid⇄list toggle (spec §11.2). Optional so existing callers/tests that
+   *  don't care about layout keep working unchanged. */
+  layout?: "grid" | "list";
+  onLayoutChange?: (l: "grid" | "list") => void;
 }
 
 const STATUS_CHIPS = ["up", "down", "degraded", "paused"];
@@ -38,6 +42,31 @@ const TopBar: Component<TopBarProps> = (props) => {
       </div>
 
       <div class="spacer" />
+
+      <Show when={props.onLayoutChange}>
+        <div class="layout-toggle" role="group" aria-label="Grid or list view">
+          <button
+            type="button"
+            class="layout-btn"
+            aria-pressed={(props.layout ?? "grid") === "grid"}
+            aria-label="Grid view"
+            title="Grid view"
+            onClick={() => props.onLayoutChange?.("grid")}
+          >
+            ▦
+          </button>
+          <button
+            type="button"
+            class="layout-btn"
+            aria-pressed={props.layout === "list"}
+            aria-label="List view"
+            title="List view"
+            onClick={() => props.onLayoutChange?.("list")}
+          >
+            ☰
+          </button>
+        </div>
+      </Show>
 
       <button type="button" class="btn-accent" onClick={props.onAdd}>
         + Add monitor

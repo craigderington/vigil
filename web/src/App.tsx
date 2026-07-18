@@ -5,6 +5,7 @@ import Rail, { type RailView } from "./components/Rail";
 import TopBar from "./components/TopBar";
 import ConnectivityBanner from "./components/ConnectivityBanner";
 import MonitorGrid from "./components/MonitorGrid";
+import ListView from "./components/ListView";
 import DetailPanel from "./components/DetailPanel";
 import MonitorForm from "./components/MonitorForm";
 import Settings from "./components/Settings";
@@ -80,9 +81,24 @@ const App: Component = () => {
                 statusFilter={statusFilter()}
                 onStatusFilterChange={setStatusFilter}
                 onAdd={addMonitor}
+                layout={store.layout()}
+                onLayoutChange={store.setLayout}
               />
               <div class="app-content">
-                <MonitorGrid monitors={filtered()} onOpen={setOpenMonitorId} onChanged={store.refresh} />
+                <Show
+                  when={store.layout() === "list"}
+                  fallback={
+                    <MonitorGrid monitors={filtered()} onOpen={setOpenMonitorId} onChanged={store.refresh} />
+                  }
+                >
+                  <ListView
+                    monitors={filtered()}
+                    onOpen={setOpenMonitorId}
+                    onChanged={store.refresh}
+                    sort={store.sort()}
+                    onSortChange={store.setSort}
+                  />
+                </Show>
               </div>
             </>
           }

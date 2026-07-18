@@ -1,8 +1,29 @@
+import { createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 
 export type StoreState = { monitors: any[]; online: boolean };
 
 export type StoreEvent = { event: string; data: any };
+
+/** Dashboard grid⇄list toggle (spec §11.2 top bar). */
+export type Layout = "grid" | "list";
+
+/** Active ListView sort column + direction (spec §11.4). `col: null` means
+ *  the default sort_order-then-name order. */
+export type SortCol =
+  | null
+  | "name"
+  | "type"
+  | "last_checked_at"
+  | "response_time_ms"
+  | "uptime_24h"
+  | "uptime_7d"
+  | "uptime_30d";
+export type SortDir = "asc" | "desc";
+export interface ListSort {
+  col: SortCol;
+  dir: SortDir;
+}
 
 /** Pure reducer: given a state and an SSE frame, returns a NEW state. */
 export function applyEvent(s: StoreState, ev: StoreEvent): StoreState {
@@ -56,6 +77,13 @@ function patchMonitor(monitors: any[], id: number, patch: Record<string, any>): 
 export function createMonitorStore() {
   const [state, setState] = createStore<StoreState>({ monitors: [], online: true });
 
+  // View + sort live here (rather than as local signals inside ListView)
+  // so they survive toggling back and forth between grid and list within a
+  // session — a signal created inside ListView itself would reset every
+  // time the component unmounts on switching back to grid.
+  const [layout, setLayout] = createSignal<Layout>("grid");
+  const [sort, setSort] = createSignal<ListSort>({ col: null, dir: "asc" });
+
   async function refresh() {
     try {
       const res = await fetch("/api/monitors");
@@ -98,5 +126,9 @@ export function createMonitorStore() {
     monitorById,
     refresh,
     close: () => source.close(),
+    layout,
+    setLayout,
+    sort,
+    setSort,
   };
 }
