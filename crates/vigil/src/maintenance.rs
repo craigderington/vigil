@@ -1,11 +1,14 @@
-//! Nightly maintenance: raw `checks` retention pruning and a weekly
-//! `PRAGMA incremental_vacuum` pass. Replaces the Task 14 stub.
+//! Nightly maintenance: daily rollup catch-up, raw `checks` retention
+//! pruning, and a weekly `PRAGMA incremental_vacuum` pass. Replaces the
+//! Task 14 stub.
 //!
 //! Retention is read from `settings_store::retention_days` on every pass
 //! (so a Settings-screen edit takes effect on the next tick without a
-//! restart) and pruning runs once per ~24h loop iteration. Every 7th pass
-//! also runs `incremental_vacuum` to reclaim space freed by pruning and
-//! rollup deletes, since the database is opened with
+//! restart) and pruning runs once per ~24h loop iteration. Rollup catch-up
+//! runs first each pass, before pruning, so a day's `checks` are always
+//! aggregated into `check_aggregates_daily` before they become eligible for
+//! deletion. Every 7th pass also runs `incremental_vacuum` to reclaim space
+//! freed by pruning and rollup deletes, since the database is opened with
 //! `SqliteAutoVacuum::Incremental` (see `db::connect`) rather than eager
 //! auto-vacuum.
 
@@ -39,6 +42,10 @@ pub async fn run(state: crate::app::AppState) {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+
+        if let Err(error) = crate::rollup::rollup_catch_up(&state.db, retention_days).await {
+            tracing::error!(%error, "nightly maintenance: rollup_catch_up failed");
+        }
 
         match prune_old_checks(&state.db, retention_days, now).await {
             Ok(removed) => {

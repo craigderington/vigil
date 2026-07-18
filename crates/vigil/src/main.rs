@@ -81,6 +81,10 @@ async fn serve() {
     tokio::spawn(anchor.run_poller());
     tokio::spawn(engine::run_connectivity_reactor(state.clone()));
     tokio::spawn(maintenance::run(state.clone()));
+    // One-shot rollup catch-up at startup, so a period of downtime doesn't
+    // leave gaps in the 90-day uptime bars until the next nightly pass.
+    // Spawned rather than awaited so it never delays serving traffic.
+    tokio::spawn(startup_rollup_catch_up(state.clone()));
 
     let listener = match tokio::net::TcpListener::bind(&cfg.bind).await {
         Ok(l) => l,
@@ -93,6 +97,16 @@ async fn serve() {
     if let Err(err) = axum::serve(listener, app::router(state)).await {
         eprintln!("vigil: server error: {err}");
         std::process::exit(1);
+    }
+}
+
+/// One-shot rollup catch-up run at boot (see `serve`). Errors are logged,
+/// never fatal — the nightly `maintenance::run` pass will retry.
+async fn startup_rollup_catch_up(state: app::AppState) {
+    let retention_days = settings_store::retention_days(&state.db).await;
+    match vigil::rollup::rollup_catch_up(&state.db, retention_days).await {
+        Ok(()) => tracing::info!("startup rollup catch-up complete"),
+        Err(error) => tracing::error!(%error, "startup rollup catch-up failed"),
     }
 }
 

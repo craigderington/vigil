@@ -10,6 +10,7 @@ pub mod maintenance;
 pub mod models;
 pub mod notify;
 pub mod probe;
+pub mod rollup;
 pub mod scheduler;
 pub mod secrets;
 pub mod settings_store;
