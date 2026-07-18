@@ -1,0 +1,11 @@
+target
+**/target
+web/node_modules
+web/dist
+.git
+.worktrees
+.superpowers
+secrets/smtp_password
+*.db
+*.db-wal
+*.db-shm
