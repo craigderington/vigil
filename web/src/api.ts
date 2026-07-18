@@ -83,6 +83,10 @@ export function testChannel(id: number): Promise<{ ok: boolean; error?: string |
   return fetch(`/api/channels/${id}/test`, { method: "POST" }).then((r) => json(r));
 }
 
+export function deleteChannel(id: number): Promise<{ ok: boolean }> {
+  return fetch(`/api/channels/${id}`, { method: "DELETE" }).then((r) => json(r));
+}
+
 export interface Settings {
   anchors: string[];
   cooldown_minutes: number;

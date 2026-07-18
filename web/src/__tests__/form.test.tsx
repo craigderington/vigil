@@ -139,3 +139,31 @@ test("switching from https http to port after enabling SSL clears ssl_check_enab
   expect(dto.type).toBe("port");
   expect(dto.ssl_check_enabled).toBe(false);
 });
+
+test("attaching a channel with ssl_expiring checked sends ssl_expiring in triggers", async () => {
+  const getChannels = vi.fn(async () => [{ id: 7, name: "Hook", type: "webhook" }]);
+  const createMonitor = vi.fn(async (_dto: any) => ({ id: 10 }));
+  const setMonitorNotifications = vi.fn(async (_id: number, _list: any) => ({ ok: true }));
+  render(() => (
+    <MonitorForm
+      api={{ getChannels, createMonitor, setMonitorNotifications } as any}
+      onSaved={() => {}}
+      onClose={() => {}}
+    />
+  ));
+
+  fireEvent.input(screen.getByLabelText("Name"), { target: { value: "x" } });
+  fireEvent.input(screen.getByLabelText("URL"), { target: { value: "https://e.com" } });
+
+  await screen.findByText("Hook");
+  fireEvent.click(screen.getByLabelText("Hook"));
+  fireEvent.click(screen.getByLabelText(/ssl expiring/i));
+
+  fireEvent.click(screen.getByText(/create monitor/i));
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(setMonitorNotifications).toHaveBeenCalled();
+  const triggers = setMonitorNotifications.mock.calls[0][1][0].triggers;
+  expect(triggers).toContain("ssl_expiring");
+});

@@ -80,7 +80,25 @@ function textToDaysJson(text: string): string {
   return JSON.stringify(days);
 }
 
-type NotifRow = { attached: boolean; down: boolean; recovered: boolean };
+type NotifRow = {
+  attached: boolean;
+  down: boolean;
+  recovered: boolean;
+  ssl_expiring: boolean;
+  ssl_invalid: boolean;
+  domain_expiring: boolean;
+};
+
+const DEFAULT_NOTIF_ROW: NotifRow = {
+  attached: false,
+  down: true,
+  recovered: true,
+  ssl_expiring: false,
+  ssl_invalid: false,
+  domain_expiring: false,
+};
+
+const DEFAULT_NOTIF_ROW_ATTACHED: NotifRow = { ...DEFAULT_NOTIF_ROW, attached: true };
 
 const MonitorForm: Component<MonitorFormProps> = (props) => {
   const isEdit = () => props.monitor != null;
@@ -182,12 +200,14 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
       try {
         const list = await props.api.getChannels?.();
         if (!list) return;
-        const emailChannels = list.filter((c: any) => c.type === "email");
-        setChannels(emailChannels);
+        // All channel types (email/webhook/discord/ntfy) can be attached —
+        // certificate alerts (ssl_expiring/ssl_invalid/domain_expiring)
+        // aren't email-only, so this is no longer filtered to type==="email".
+        setChannels(list);
 
         const initial: Record<number, NotifRow> = {};
-        for (const c of emailChannels) {
-          initial[c.id] = { attached: false, down: true, recovered: true };
+        for (const c of list) {
+          initial[c.id] = { ...DEFAULT_NOTIF_ROW };
         }
 
         if (props.monitor?.id != null) {
@@ -197,6 +217,9 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               attached: true,
               down: item.triggers.includes("down"),
               recovered: item.triggers.includes("recovered"),
+              ssl_expiring: item.triggers.includes("ssl_expiring"),
+              ssl_invalid: item.triggers.includes("ssl_invalid"),
+              domain_expiring: item.triggers.includes("domain_expiring"),
             };
           }
         }
@@ -220,13 +243,16 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   function toggleAttached(channelId: number) {
     setNotifState((s) => ({
       ...s,
-      [channelId]: { ...(s[channelId] ?? { attached: false, down: true, recovered: true }), attached: !s[channelId]?.attached },
+      [channelId]: { ...(s[channelId] ?? DEFAULT_NOTIF_ROW), attached: !s[channelId]?.attached },
     }));
   }
-  function toggleTrigger(channelId: number, trigger: "down" | "recovered") {
+  function toggleTrigger(
+    channelId: number,
+    trigger: "down" | "recovered" | "ssl_expiring" | "ssl_invalid" | "domain_expiring",
+  ) {
     setNotifState((s) => ({
       ...s,
-      [channelId]: { ...(s[channelId] ?? { attached: true, down: true, recovered: true }), [trigger]: !s[channelId]?.[trigger] },
+      [channelId]: { ...(s[channelId] ?? DEFAULT_NOTIF_ROW_ATTACHED), [trigger]: !s[channelId]?.[trigger] },
     }));
   }
 
@@ -235,7 +261,13 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
       .filter(([, v]) => v.attached)
       .map(([id, v]) => ({
         channel_id: Number(id),
-        triggers: [...(v.down ? ["down"] : []), ...(v.recovered ? ["recovered"] : [])],
+        triggers: [
+          ...(v.down ? ["down"] : []),
+          ...(v.recovered ? ["recovered"] : []),
+          ...(v.ssl_expiring ? ["ssl_expiring"] : []),
+          ...(v.ssl_invalid ? ["ssl_invalid"] : []),
+          ...(v.domain_expiring ? ["domain_expiring"] : []),
+        ],
       }));
   }
 
@@ -722,7 +754,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               <h3 class="form-section-title">Notifications</h3>
               <For each={channels()}>
                 {(c) => {
-                  const row = () => notifState()[c.id] ?? { attached: false, down: true, recovered: true };
+                  const row = () => notifState()[c.id] ?? DEFAULT_NOTIF_ROW;
                   return (
                     <div class="notif-row">
                       <label class="form-checkbox">
@@ -745,6 +777,30 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
                             onChange={() => toggleTrigger(c.id, "recovered")}
                           />
                           recovered
+                        </label>
+                        <label class="form-checkbox inline">
+                          <input
+                            type="checkbox"
+                            checked={row().ssl_expiring}
+                            onChange={() => toggleTrigger(c.id, "ssl_expiring")}
+                          />
+                          ssl expiring
+                        </label>
+                        <label class="form-checkbox inline">
+                          <input
+                            type="checkbox"
+                            checked={row().ssl_invalid}
+                            onChange={() => toggleTrigger(c.id, "ssl_invalid")}
+                          />
+                          ssl invalid
+                        </label>
+                        <label class="form-checkbox inline">
+                          <input
+                            type="checkbox"
+                            checked={row().domain_expiring}
+                            onChange={() => toggleTrigger(c.id, "domain_expiring")}
+                          />
+                          domain expiring
                         </label>
                       </Show>
                     </div>

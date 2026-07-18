@@ -1,8 +1,52 @@
-import { render, screen } from "@solidjs/testing-library"; import { test, expect, vi } from "vitest";
+import { render, screen, fireEvent } from "@solidjs/testing-library"; import { test, expect, vi } from "vitest";
 import Settings from "../components/Settings";
 test("shows docker-secret note and no password field", () => {
   vi.stubGlobal("fetch", vi.fn(async () => ({ ok:true, json: async () => ({}) })) as any);
   render(() => <Settings />);
   expect(screen.getByText(/managed via Docker secret/i)).toBeTruthy();
   expect(screen.queryByLabelText(/password/i)).toBeNull();
+});
+
+test("add-channel form: default email type shows SMTP username; switching to webhook shows URL and hides SMTP host", () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => [] })) as any);
+  render(() => <Settings />);
+
+  // default type is email — its config fields (incl. optional username) show
+  expect(screen.getByLabelText(/smtp username/i)).toBeTruthy();
+  expect(screen.getByLabelText(/smtp host/i)).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: "Webhook" }));
+
+  expect(screen.queryByLabelText(/smtp host/i)).toBeNull();
+  expect(screen.queryByLabelText(/smtp username/i)).toBeNull();
+  expect(screen.getByLabelText(/^url$/i)).toBeTruthy();
+});
+
+test("saving a new webhook channel POSTs type=webhook with url in config", async () => {
+  const posts: any[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: any, opts?: any) => {
+      if (typeof url === "string" && url === "/api/channels" && opts?.method === "POST") {
+        posts.push(JSON.parse(opts.body));
+        return {
+          ok: true,
+          json: async () => ({ id: 42, name: "Hook", type: "webhook", config: opts.body, is_active: true, created_at: 0 }),
+        };
+      }
+      return { ok: true, json: async () => [] };
+    }) as any,
+  );
+
+  render(() => <Settings />);
+  fireEvent.click(screen.getByRole("button", { name: "Webhook" }));
+  fireEvent.input(screen.getByLabelText(/^url$/i), { target: { value: "https://hooks.example.com/abc" } });
+  fireEvent.click(screen.getByRole("button", { name: /create channel/i }));
+
+  await screen.findByText(/channel added/i);
+
+  expect(posts.length).toBe(1);
+  expect(posts[0].type).toBe("webhook");
+  const cfg = JSON.parse(posts[0].config);
+  expect(cfg.url).toBe("https://hooks.example.com/abc");
 });
