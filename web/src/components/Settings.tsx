@@ -124,7 +124,10 @@ const Settings: Component = () => {
     setSaving(true);
     setSaveNote(null);
     try {
-      const config = buildEmailConfig();
+      // Backend stores `config` verbatim as a JSON-object string (it no longer
+      // re-encodes it), so the wire contract requires an already-serialized
+      // string here, not a nested object.
+      const config = JSON.stringify(buildEmailConfig());
       const existing = emailChannel();
       const saved =
         existing?.id != null

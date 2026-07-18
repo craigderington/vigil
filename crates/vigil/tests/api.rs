@@ -66,7 +66,7 @@ async fn serve(state: vigil::app::AppState) -> std::net::SocketAddr {
 #[tokio::test] async fn channels_crud() {
     let env = test_state().await; let a = serve(env.state.clone()).await; let c = reqwest::Client::new();
     let created: serde_json::Value = c.post(format!("http://{a}/api/channels"))
-        .json(&serde_json::json!({"name":"mail","type":"email","config":{"host":"h","port":25,"security":"none","from":"f@b","to":["a@b"]}}))
+        .json(&serde_json::json!({"name":"mail","type":"email","config":r#"{"host":"h","port":25,"security":"none","from":"f@b","to":["a@b"]}"#}))
         .send().await.unwrap().json().await.unwrap();
     assert!(created["id"].as_i64().is_some());
     let list: serde_json::Value = c.get(format!("http://{a}/api/channels")).send().await.unwrap().json().await.unwrap();
@@ -90,4 +90,22 @@ async fn serve(state: vigil::app::AppState) -> std::net::SocketAddr {
     c.put(format!("http://{a}/api/settings")).json(&serde_json::json!({"cooldown_minutes":30})).send().await.unwrap();
     let s2: serde_json::Value = c.get(format!("http://{a}/api/settings")).send().await.unwrap().json().await.unwrap();
     assert_eq!(s2["cooldown_minutes"].as_i64(), Some(30));
+}
+#[tokio::test] async fn channel_config_stored_verbatim_not_double_encoded() {
+    let env = test_state().await; let a = serve(env.state.clone()).await; let c = reqwest::Client::new();
+    let cfg = r#"{"host":"h","port":25,"security":"none","from":"a@b.com","to":["c@b.com"]}"#;
+    let created: serde_json::Value = c.post(format!("http://{a}/api/channels"))
+        .json(&serde_json::json!({"name":"E","type":"email","config":cfg})).send().await.unwrap()
+        .json().await.unwrap();
+    let id = created["id"].as_i64().unwrap();
+    // GET it back and confirm config parses to an OBJECT (host=="h"), i.e. NOT double-encoded
+    let list: serde_json::Value = c.get(format!("http://{a}/api/channels")).send().await.unwrap().json().await.unwrap();
+    let stored = list.as_array().unwrap().iter().find(|ch| ch["id"].as_i64()==Some(id)).unwrap();
+    let config_str = stored["config"].as_str().expect("config should be a string");
+    let parsed: serde_json::Value = serde_json::from_str(config_str).expect("stored config must be a plain JSON object string");
+    assert_eq!(parsed["host"].as_str(), Some("h"), "config must round-trip as an object, not a double-encoded string");
+    // and /test must NOT return a parse error (it'll fail to connect since no SMTP server, but not 'expected struct')
+    let test_resp: serde_json::Value = c.post(format!("http://{a}/api/channels/{id}/test")).send().await.unwrap().json().await.unwrap();
+    let err = test_resp["error"].as_str().unwrap_or("");
+    assert!(!err.contains("expected struct"), "test must not fail on config parse; got: {err}");
 }

@@ -46,7 +46,7 @@ pub async fn list(State(state): State<AppState>) -> ApiResult<Vec<Channel>> {
 pub struct CreateChannelDto {
     pub name: String,
     pub r#type: String,
-    pub config: Value,
+    pub config: String,
 }
 
 pub async fn create(
@@ -54,14 +54,13 @@ pub async fn create(
     Json(dto): Json<CreateChannelDto>,
 ) -> ApiResult<Channel> {
     let ts = now();
-    let config_str = dto.config.to_string();
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO notification_channels (name, type, config, is_active, created_at) \
          VALUES (?, ?, ?, 1, ?) RETURNING id",
     )
     .bind(&dto.name)
     .bind(&dto.r#type)
-    .bind(&config_str)
+    .bind(&dto.config)
     .bind(ts)
     .fetch_one(&state.db)
     .await
@@ -74,7 +73,7 @@ pub async fn create(
 #[derive(Deserialize)]
 pub struct UpdateChannelDto {
     pub name: Option<String>,
-    pub config: Option<Value>,
+    pub config: Option<String>,
     pub is_active: Option<bool>,
 }
 
@@ -86,7 +85,7 @@ pub async fn update(
     let existing = fetch_channel(&state.db, id).await.map_err(db_err)?.ok_or_else(not_found)?;
 
     let name = dto.name.unwrap_or(existing.name);
-    let config = dto.config.map(|c| c.to_string()).unwrap_or(existing.config);
+    let config = dto.config.unwrap_or(existing.config);
     let is_active = dto.is_active.unwrap_or(existing.is_active);
 
     sqlx::query("UPDATE notification_channels SET name = ?, config = ?, is_active = ? WHERE id = ?")
