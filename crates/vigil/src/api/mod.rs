@@ -40,6 +40,8 @@ pub fn routes() -> Router<AppState> {
         .route("/monitors/:id/resume", post(monitors::resume))
         .route("/monitors/:id/check-now", post(monitors::check_now))
         .route("/monitors/:id/stats", get(monitors::stats))
+        .route("/monitors/:id/series", get(monitors::series))
+        .route("/monitors/:id/bars", get(monitors::bars))
         .route(
             "/monitors/:id/notifications",
             get(monitors::list_notifications).put(monitors::set_notifications),

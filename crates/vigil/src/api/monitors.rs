@@ -388,6 +388,17 @@ pub async fn set_notifications(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Maps a `range` query value to a window length in seconds. Unknown or
+/// absent values default to 24h (the P1 behavior).
+fn range_window_seconds(range: Option<&str>) -> i64 {
+    match range {
+        Some("7d") => 7 * 86400,
+        Some("30d") => 30 * 86400,
+        Some("90d") => 90 * 86400,
+        _ => 86400,
+    }
+}
+
 #[derive(Deserialize)]
 pub struct StatsQuery {
     range: Option<String>,
@@ -398,7 +409,7 @@ pub async fn stats(
     Path(id): Path<i64>,
     Query(q): Query<StatsQuery>,
 ) -> ApiResult<Value> {
-    let window: i64 = if q.range.as_deref() == Some("7d") { 7 * 86400 } else { 86400 };
+    let window = range_window_seconds(q.range.as_deref());
     let ts = now();
     let window_start = ts - window;
 
@@ -427,15 +438,57 @@ pub async fn stats(
 
     let u = uptime::compute(&spans, window_start, ts, had_any_check);
 
-    let avg_ms: Option<f64> = sqlx::query_scalar(
-        "SELECT AVG(response_time_ms) FROM checks WHERE monitor_id = ? AND checked_at >= ? \
-         AND response_time_ms IS NOT NULL",
-    )
-    .bind(id)
-    .bind(window_start)
-    .fetch_one(&state.db)
-    .await
-    .map_err(db_err)?;
+    // 24h/7d: a straight average over raw `checks` is cheap and precise
+    // enough. 30d/90d: raw checks that old may already be pruned (retention
+    // default 30d), so fold in the daily rollups (count-weighted by
+    // `sample_count`) plus today's not-yet-rolled-up raw checks as one more
+    // weighted term.
+    let avg_ms: Option<f64> = if window <= 7 * 86400 {
+        sqlx::query_scalar(
+            "SELECT AVG(response_time_ms) FROM checks WHERE monitor_id = ? AND checked_at >= ? \
+             AND response_time_ms IS NOT NULL",
+        )
+        .bind(id)
+        .bind(window_start)
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err)?
+    } else {
+        let retention = crate::settings_store::retention_days(&state.db).await;
+        crate::rollup::ensure_aggregates(&state.db, id, retention)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let window_start_day = crate::rollup::day_str(window_start);
+        let (agg_sum, agg_n): (Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT CAST(SUM(avg_response_ms * sample_count) AS REAL), CAST(SUM(sample_count) AS REAL) \
+             FROM check_aggregates_daily \
+             WHERE monitor_id = ? AND day >= ? AND avg_response_ms IS NOT NULL",
+        )
+        .bind(id)
+        .bind(&window_start_day)
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err)?;
+
+        // Today's aggregate row doesn't exist yet (`ensure_aggregates` never
+        // rolls up the current day), so blend in today's raw checks as one
+        // more weighted term.
+        let last24_start = ts - 86400;
+        let (raw_sum, raw_n): (Option<f64>, Option<f64>) = sqlx::query_as(
+            "SELECT CAST(SUM(response_time_ms) AS REAL), CAST(COUNT(response_time_ms) AS REAL) \
+             FROM checks WHERE monitor_id = ? AND checked_at >= ? AND response_time_ms IS NOT NULL",
+        )
+        .bind(id)
+        .bind(last24_start)
+        .fetch_one(&state.db)
+        .await
+        .map_err(db_err)?;
+
+        let total_sum = agg_sum.unwrap_or(0.0) + raw_sum.unwrap_or(0.0);
+        let total_n = agg_n.unwrap_or(0.0) + raw_n.unwrap_or(0.0);
+        if total_n > 0.0 { Some(total_sum / total_n) } else { None }
+    };
 
     // Reuse the already-computed `spans` (overlapping the window) rather than
     // a separately-scoped `started_at >= window_start` query — that narrower
@@ -449,4 +502,185 @@ pub async fn stats(
         "avg_ms": avg_ms,
         "incidents": incidents,
     })))
+}
+
+/// One bucketed point of the response-time/status series (§11.6 #4 — the
+/// detail panel's response-time chart).
+#[derive(serde::Serialize)]
+pub struct SeriesPoint {
+    t: i64,
+    ms: Option<i64>,
+    status: String,
+}
+
+#[derive(Deserialize)]
+pub struct SeriesQuery {
+    range: Option<String>,
+}
+
+/// Raw `checks` in the window, bucketed into at most 300 equal time-slots
+/// (empty slots omitted) so a wide range never ships hundreds of thousands
+/// of points to the frontend. Each slot's `ms` is the average response time
+/// of checks landing in it; `status` is `"down"` if any check in the slot
+/// was down, else `"up"`.
+pub async fn series(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<SeriesQuery>,
+) -> ApiResult<Vec<SeriesPoint>> {
+    const MAX_BUCKETS: i64 = 300;
+
+    let window = range_window_seconds(q.range.as_deref());
+    let ts = now();
+    let window_start = ts - window;
+
+    let rows: Vec<(i64, Option<i64>, String)> = sqlx::query_as(
+        "SELECT checked_at, response_time_ms, status FROM checks \
+         WHERE monitor_id = ? AND checked_at >= ? ORDER BY checked_at ASC",
+    )
+    .bind(id)
+    .bind(window_start)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_err)?;
+
+    let slot_width = (window / MAX_BUCKETS).max(1);
+
+    // slot -> (sum_ms, count_ms, any_down)
+    let mut buckets: std::collections::BTreeMap<i64, (i64, i64, bool)> = std::collections::BTreeMap::new();
+    for (checked_at, ms, status) in rows {
+        let slot = ((checked_at - window_start) / slot_width).clamp(0, MAX_BUCKETS - 1);
+        let entry = buckets.entry(slot).or_insert((0, 0, false));
+        if let Some(v) = ms {
+            entry.0 += v;
+            entry.1 += 1;
+        }
+        if status == "down" {
+            entry.2 = true;
+        }
+    }
+
+    let points = buckets
+        .into_iter()
+        .map(|(slot, (sum, count, any_down))| SeriesPoint {
+            t: window_start + slot * slot_width,
+            ms: if count > 0 { Some(((sum as f64) / (count as f64)).round() as i64) } else { None },
+            status: if any_down { "down" } else { "up" }.to_string(),
+        })
+        .collect();
+
+    Ok(Json(points))
+}
+
+/// One day of the 90-day uptime bar (§11.5).
+#[derive(serde::Serialize)]
+pub struct BarRow {
+    day: String,
+    uptime_pct: Option<f64>,
+    incidents: i64,
+    down_seconds: i64,
+    has_data: bool,
+}
+
+#[derive(Deserialize)]
+pub struct BarsQuery {
+    days: Option<i64>,
+}
+
+/// Per-day uptime/downtime/incident-count for the last `days` UTC days
+/// (default 90, capped at 90), oldest first. Backs the signature 90-day
+/// uptime bar. `has_data` distinguishes "100% up all day" from "no signal
+/// at all for this day" (rendered as the muted `--border-default` segment)
+/// — computed from a rollup row, a raw check, or an overlapping incident.
+pub async fn bars(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<BarsQuery>,
+) -> ApiResult<Vec<BarRow>> {
+    let days = q.days.unwrap_or(90).clamp(1, 90);
+
+    let retention = crate::settings_store::retention_days(&state.db).await;
+    crate::rollup::ensure_aggregates(&state.db, id, retention)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let ts = now();
+    let today = crate::rollup::day_str(ts);
+    let (today_start, today_end) = crate::rollup::day_bounds(&today);
+    let range_start = today_start - (days - 1) * 86400;
+    let retention_floor = ts - retention * 86400;
+
+    // Every incident that could overlap any day in range, fetched once.
+    let raw_spans: Vec<(i64, Option<i64>)> = sqlx::query_as(
+        "SELECT started_at, resolved_at FROM incidents WHERE monitor_id = ? \
+         AND started_at < ? AND (resolved_at IS NULL OR resolved_at > ?)",
+    )
+    .bind(id)
+    .bind(today_end)
+    .bind(range_start)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_err)?;
+    let all_spans: Vec<uptime::Span> =
+        raw_spans.into_iter().map(|(start, end)| uptime::Span { start, end }).collect();
+
+    // Days (UTC, "YYYY-MM-DD") with at least one raw check, fetched once.
+    let check_days: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT DISTINCT date(checked_at, 'unixepoch') FROM checks \
+         WHERE monitor_id = ? AND checked_at >= ? AND checked_at < ?",
+    )
+    .bind(id)
+    .bind(range_start)
+    .bind(today_end)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .collect();
+
+    // Days with an existing rollup row, fetched once.
+    let agg_days: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT day FROM check_aggregates_daily WHERE monitor_id = ? AND day >= ? AND day <= ?",
+    )
+    .bind(id)
+    .bind(crate::rollup::day_str(range_start))
+    .bind(&today)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_err)?
+    .into_iter()
+    .collect();
+
+    let mut out = Vec::with_capacity(days as usize);
+    for offset in (0..days).rev() {
+        let day_start = today_start - offset * 86400;
+        let day = crate::rollup::day_str(day_start);
+        let (ds, de) = crate::rollup::day_bounds(&day);
+        let clipped_end = de.min(ts).max(ds);
+
+        let day_spans: Vec<uptime::Span> = all_spans
+            .iter()
+            .filter(|s| s.start < de && s.end.is_none_or(|e| e > ds))
+            .copied()
+            .collect();
+
+        let u = uptime::compute(&day_spans, ds, clipped_end, true);
+
+        let incidents =
+            all_spans.iter().filter(|s| s.start >= ds && s.start < de).count() as i64;
+
+        let has_data = agg_days.contains(&day)
+            || (ds >= retention_floor && check_days.contains(&day))
+            || !day_spans.is_empty();
+
+        out.push(BarRow {
+            day,
+            uptime_pct: u.uptime_pct,
+            incidents,
+            down_seconds: u.downtime_seconds,
+            has_data,
+        });
+    }
+
+    Ok(Json(out))
 }
