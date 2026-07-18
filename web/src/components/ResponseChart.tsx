@@ -17,6 +17,11 @@ export interface ResponseChartProps {
 
 const RANGES: StatsRange[] = ["24h", "7d"];
 
+/** Width in seconds of a given chart range preset. */
+function rangeSeconds(range: string): number {
+  return range === "7d" ? 7 * 86400 : 86400;
+}
+
 function prefersReducedMotion(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -78,12 +83,15 @@ const ResponseChart: Component<ResponseChartProps> = (props) => {
     plot = undefined;
   }
 
+  // The shading (and chart axis, below) window is derived from the
+  // *selected range*, not from the data that happened to survive — the
+  // backend omits empty buckets, so deriving `from`/`to` from
+  // data[0]/data[last] would clip away an incident that occurred before the
+  // first surviving point (e.g. a check gap at the start of the window)
+  // even though it's within the selected 24h/7d range.
   const windowRange = () => {
-    const data = series() ?? [];
-    if (data.length === 0) return null;
-    const from = data[0].t;
-    const to = data[data.length - 1].t;
-    return { from, to };
+    const nowSecs = Math.floor(Date.now() / 1000);
+    return { from: nowSecs - rangeSeconds(range()), to: nowSecs };
   };
 
   createEffect(
@@ -118,6 +126,7 @@ const ResponseChart: Component<ResponseChartProps> = (props) => {
 
         const xs = data.map((p) => p.t);
         const ys = data.map((p) => (p.ms == null ? null : p.ms));
+        const w = windowRange();
 
         // uPlot has no global "animate" switch; the one motion knob it
         // exposes here is the hover cursor, which we drop entirely under
@@ -127,6 +136,10 @@ const ResponseChart: Component<ResponseChartProps> = (props) => {
           width: target.clientWidth,
           height: 200,
           cursor: prefersReducedMotion() ? { show: false } : { points: { size: 6 } },
+          // Pin the x-axis to the selected range window (not the sparse
+          // data bounds) so the axis is consistent with the incident
+          // shading overlay above.
+          scales: { x: { min: w.from, max: w.to } },
           series: [
             {},
             {
@@ -154,9 +167,7 @@ const ResponseChart: Component<ResponseChartProps> = (props) => {
 
   const shadeBands = () => {
     const w = windowRange();
-    if (!w) return [] as ShadeBand[];
-    const to = Math.max(w.to, Math.floor(Date.now() / 1000));
-    return bandsFor(incidents() ?? [], w.from, to);
+    return bandsFor(incidents() ?? [], w.from, w.to);
   };
 
   return (
