@@ -1,4 +1,5 @@
 /target
 web/node_modules
 web/dist
-secrets/smtp_password
+secrets/*
+!secrets/*.example
