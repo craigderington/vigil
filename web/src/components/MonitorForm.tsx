@@ -20,6 +20,7 @@ const MONITOR_TYPES: { label: string; value: string }[] = [
   { label: "Port", value: "port" },
   { label: "Ping", value: "ping" },
   { label: "DNS", value: "dns" },
+  { label: "SSL", value: "ssl" },
 ];
 
 const DNS_RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
@@ -57,6 +58,28 @@ function parseInitialAuthValue(authRef: string | null | undefined): string {
   return authRef; // env:VAR — leave the prefix visible so it round-trips
 }
 
+/** `ssl_alert_days`/`domain_alert_days` arrive from the API as a JSON-array
+ *  STRING (e.g. `"[30,14,7,3,1]"`). The form edits them as a plain
+ *  comma-separated text field — no chip widget, just a text input. */
+function daysToText(json: string | null | undefined): string | null {
+  if (!json) return null;
+  try {
+    const arr = JSON.parse(json);
+    if (!Array.isArray(arr)) return null;
+    return arr.join(",");
+  } catch {
+    return null;
+  }
+}
+
+function textToDaysJson(text: string): string {
+  const days = text
+    .split(",")
+    .map((x) => parseInt(x.trim(), 10))
+    .filter((n) => !isNaN(n));
+  return JSON.stringify(days);
+}
+
 type NotifRow = { attached: boolean; down: boolean; recovered: boolean };
 
 const MonitorForm: Component<MonitorFormProps> = (props) => {
@@ -79,6 +102,24 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   const [dnsExpectedValue, setDnsExpectedValue] = createSignal(props.monitor?.dns_expected_value ?? "");
 
   const isHttpLike = () => type() === "http" || type() === "keyword";
+
+  // Certificate & Domain (§6) — SSL is allowed on an https URL or the
+  // dedicated ssl type; domain expiry just needs a host/url to derive a
+  // registrable domain from, so it's kept simple and always available.
+  const [sslCheckEnabled, setSslCheckEnabled] = createSignal<boolean>(
+    props.monitor?.ssl_check_enabled ?? false,
+  );
+  const [sslAlertDays, setSslAlertDays] = createSignal<string>(
+    daysToText(props.monitor?.ssl_alert_days) ?? "30,14,7,3,1",
+  );
+  const [domainCheckEnabled, setDomainCheckEnabled] = createSignal<boolean>(
+    props.monitor?.domain_check_enabled ?? false,
+  );
+  const [domainAlertDays, setDomainAlertDays] = createSignal<string>(
+    daysToText(props.monitor?.domain_alert_days) ?? "45,30,14,7",
+  );
+
+  const sslAllowed = () => (isHttpLike() && url().startsWith("https://")) || type() === "ssl";
 
   const [intervalSeconds, setIntervalSeconds] = createSignal<number>(
     props.monitor?.interval_seconds ?? 300,
@@ -228,7 +269,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
         dto.keyword_mode = keywordMode();
         dto.keyword_case_sensitive = keywordCaseSensitive();
       }
-    } else if (t === "port") {
+    } else if (t === "port" || t === "ssl") {
       dto.host = host();
       dto.port = portValue();
     } else if (t === "ping") {
@@ -239,6 +280,12 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
       dto.dns_record_type = dnsRecordType();
       dto.dns_expected_value = dnsExpectedValue().trim() === "" ? null : dnsExpectedValue();
     }
+
+    // Certificate & Domain (§6) — always sent so edits can turn them off.
+    dto.ssl_check_enabled = t === "ssl" ? true : sslCheckEnabled();
+    dto.ssl_alert_days = textToDaysJson(sslAlertDays());
+    dto.domain_check_enabled = domainCheckEnabled();
+    dto.domain_alert_days = textToDaysJson(domainAlertDays());
 
     return dto;
   }
@@ -369,7 +416,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               </label>
             </Show>
 
-            <Show when={type() === "port" || type() === "ping" || type() === "dns"}>
+            <Show when={type() === "port" || type() === "ping" || type() === "dns" || type() === "ssl"}>
               <div class="form-field">
                 <label for="mf-host">Host</label>
                 <input
@@ -382,7 +429,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               </div>
             </Show>
 
-            <Show when={type() === "port"}>
+            <Show when={type() === "port" || type() === "ssl"}>
               <div class="form-field">
                 <label for="mf-port">Port</label>
                 <input
@@ -611,6 +658,50 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               </Show>
             </section>
           </Show>
+
+          <section class="form-section">
+            <h3 class="form-section-title">Certificate & Domain</h3>
+            <label class="form-checkbox">
+              <input
+                type="checkbox"
+                checked={type() === "ssl" ? true : sslCheckEnabled()}
+                disabled={type() === "ssl" || !sslAllowed()}
+                onChange={(e) => setSslCheckEnabled(e.currentTarget.checked)}
+              />
+              Enable SSL certificate check
+            </label>
+            <Show when={type() === "ssl" || sslCheckEnabled()}>
+              <div class="form-field">
+                <label for="mf-ssl-alert-days">SSL alert days (comma-separated)</label>
+                <input
+                  id="mf-ssl-alert-days"
+                  type="text"
+                  value={sslAlertDays()}
+                  onInput={(e) => setSslAlertDays(e.currentTarget.value)}
+                />
+              </div>
+            </Show>
+
+            <label class="form-checkbox">
+              <input
+                type="checkbox"
+                checked={domainCheckEnabled()}
+                onChange={(e) => setDomainCheckEnabled(e.currentTarget.checked)}
+              />
+              Enable domain expiry check
+            </label>
+            <Show when={domainCheckEnabled()}>
+              <div class="form-field">
+                <label for="mf-domain-alert-days">Domain alert days (comma-separated)</label>
+                <input
+                  id="mf-domain-alert-days"
+                  type="text"
+                  value={domainAlertDays()}
+                  onInput={(e) => setDomainAlertDays(e.currentTarget.value)}
+                />
+              </div>
+            </Show>
+          </section>
 
           <Show when={channels().length > 0}>
             <section class="form-section">
