@@ -7,6 +7,8 @@ services:
     secrets: [smtp_password]
     environment:
       VIGIL_SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      VIGIL_BIND: ${VIGIL_BIND:-0.0.0.0:8080}
+      VIGIL_MAX_CONCURRENCY: ${VIGIL_MAX_CONCURRENCY:-25}
 volumes: { vigil-data: {} }
 secrets:
   smtp_password:

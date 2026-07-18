@@ -18,8 +18,16 @@ docker compose up -d
 Vigil is now running at <http://localhost:8080>. The container listens on
 port 8080 internally regardless of the host port you publish it on.
 
-Optionally copy `.env.example` to `.env` to override defaults (`VIGIL_BIND`,
-`VIGIL_MAX_CONCURRENCY`, `VIGIL_HOST_PORT`).
+Optionally copy `.env.example` to `.env` to override defaults. `docker
+compose` forwards each of these into the container's environment:
+
+- `VIGIL_HOST_PORT` — the published **host** port (default `8080`).
+- `VIGIL_BIND` — the container-**internal** bind address (default
+  `0.0.0.0:8080`). If you change its PORT, the container's Docker
+  healthcheck derives its probe port from this same value, so it stays in
+  sync automatically.
+- `VIGIL_MAX_CONCURRENCY` — global cap on simultaneous probes in flight
+  (default `25`).
 
 ### Changing the published host port
 
@@ -40,11 +48,17 @@ always 8080 — only the host-side mapping changes.
 - **`docker compose down -v` deletes that volume.** This is the one command
   that wipes your monitors, check history, and incidents — don't run it
   unless you mean to start over.
-- **Backup one-liner** (copies the live DB file out to `./vigil-backup.db`):
+- **Backup** (copies the live DB file out to `./vigil-backup.db`): the
+  database runs in SQLite WAL mode, so a hot copy of just `vigil.db` can miss
+  data still sitting in `vigil.db-wal` and yield a torn or stale backup.
+  Stop the container first so it cleanly checkpoints the WAL into the main
+  file on shutdown, copy, then start it back up:
 
   ```bash
+  docker compose stop vigil
   docker run --rm -v vigil-data:/d -v "$PWD":/out debian:bookworm-slim \
     cp /d/vigil.db /out/vigil-backup.db
+  docker compose start vigil
   ```
 
 ## Rotating the SMTP password

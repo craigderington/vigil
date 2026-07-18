@@ -20,10 +20,22 @@ async fn main() {
     }
 }
 
-/// GET `http://127.0.0.1:8080/healthz` and exit 0 on a 2xx response, 1 otherwise.
+/// Extracts the port from a `host:port` bind string, e.g. `"0.0.0.0:8080"` ->
+/// `"8080"`. Falls back to returning the input unchanged if no `:` is
+/// present — this is a best-effort local check, not a strict parser.
+fn port_from_bind(bind: &str) -> &str {
+    bind.rsplit(':').next().unwrap_or("8080")
+}
+
+/// GET `http://127.0.0.1:{port}/healthz` (port derived from `VIGIL_BIND` via
+/// `config::Config::from_env`) and exit 0 on a 2xx response, 1 otherwise.
 /// Used as the Docker `HEALTHCHECK` probe (see the plan's Dockerfile step).
+/// Always probes loopback, which is correct even when the app binds
+/// `0.0.0.0` inside the container.
 async fn healthcheck() {
-    match reqwest::get("http://127.0.0.1:8080/healthz").await {
+    let port = port_from_bind(&Config::from_env().bind).to_string();
+    let url = format!("http://127.0.0.1:{port}/healthz");
+    match reqwest::get(&url).await {
         Ok(resp) if resp.status().is_success() => std::process::exit(0),
         Ok(resp) => {
             eprintln!("vigil healthcheck: unhealthy status {}", resp.status());
@@ -81,5 +93,17 @@ async fn serve() {
     if let Err(err) = axum::serve(listener, app::router(state)).await {
         eprintln!("vigil: server error: {err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_from_bind_extracts_port() {
+        assert_eq!(port_from_bind("0.0.0.0:8080"), "8080");
+        assert_eq!(port_from_bind("127.0.0.1:9090"), "9090");
+        assert_eq!(port_from_bind("garbage"), "garbage");
     }
 }
