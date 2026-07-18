@@ -60,11 +60,13 @@ pub async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result<()>;  
 pub async fn reap_once(state: &AppState) -> anyhow::Result<()>;                 // one reaper pass (§6)
 pub async fn run_reaper(state: AppState);                                        // loop { sleep(tick); reap_once }
 
-// engine.rs — signature change (one prod caller worker::run_check + two test call sites):
-pub async fn apply_result(state:&AppState, m:&Monitor, out:&ProbeOutcome, anchor: crate::anchor::Connectivity)
+// engine.rs — signature change (one prod caller worker::run_check + the run_once test helper):
+pub async fn apply_result(state:&AppState, m:&Monitor, out:&ProbeOutcome, anchor: crate::models::Connectivity)
     -> anyhow::Result<ApplyOutcome>;
 // engine.rs — two reusable post-commit notify helpers extracted from apply_result, called by
-// apply_result AND heartbeat.rs (so the incident/event/dispatch logic lives once):
+// apply_result AND heartbeat.rs. They emit IncidentOpened/Resolved + MonitorTransition + dispatch
+// ONLY — NOT MonitorUpdated (apply_result keeps its single tail MonitorUpdated; heartbeat callers
+// emit their own MonitorUpdated{response_time_ms:None} after commit):
 pub(crate) async fn emit_opened(state:&AppState, m:&Monitor, incident_id:i64, from:Status, to:Status, down_trigger:Trigger);
 pub(crate) async fn emit_resolved(state:&AppState, m:&Monitor, incident_id:i64, from:Status, to:Status, duration_seconds:i64);
 // down_trigger is chosen by caller: Trigger::HeartbeatMissed for type=="heartbeat", else Trigger::Down.
@@ -75,9 +77,36 @@ pub async fn heartbeat_tick_seconds(pool:&SqlitePool) -> i64;  // key "heartbeat
 // probe/http.rs already exposes `pub const DEFAULT_USER_AGENT` (unrelated P4 hotfix, already on master).
 ```
 
-**Anchor** (`crate::anchor::Connectivity`): `Online | Offline`, from `state.anchor.current().await`.
+**Anchor** (`crate::models::Connectivity` — it's defined in `models.rs:281`; `anchor.rs` only
+`use`s it privately, so `crate::anchor::Connectivity` does NOT resolve): `Online | Offline`, from
+`state.anchor.current().await`. Tests: `vigil::models::Connectivity` (or bare `Connectivity` where
+`use vigil::models::*;` is in scope, e.g. `engine_cycle.rs:1`).
 **AppState**: `{ db, bus, transport, sched_tx, anchor, http_sender }`.
 **SchedCmd** (app.rs): `Upsert(i64) | Remove(i64) | CheckNow(i64) | Complete(i64)`.
+
+### Heartbeat transition pattern (the ONE design shared by record_ping + the reaper)
+
+Every heartbeat state change is **one `BEGIN IMMEDIATE` transaction** — status flip + incident
+open/close together (mirroring `apply_result`'s single-tx invariant at engine.rs:64-141) — then events
++ dispatch happen **after commit**. `BEGIN IMMEDIATE` takes the write lock up front, so a
+read-then-write inside it cannot interleave with the other path (no `SQLITE_BUSY_SNAPSHOT`, no
+double-recover). Use it explicitly: `let mut c = state.db.acquire().await?;
+sqlx::query("BEGIN IMMEDIATE").execute(&mut *c).await?; … sqlx::query("COMMIT").execute(&mut *c).await?;`.
+
+- **emit helpers do NOT emit `MonitorUpdated`.** `apply_result` already emits exactly one
+  `MonitorUpdated` unconditionally at its tail (engine.rs:189-194) carrying `out.response_time_ms`.
+  `emit_opened`/`emit_resolved` emit only `IncidentOpened`/`IncidentResolved` + `MonitorTransition` +
+  the dispatch. **record_ping and the reaper each emit their OWN `MonitorUpdated{ response_time_ms:
+  None }` after commit** (heartbeats have no response time).
+
+### Token is `#[serde(skip_serializing)]` (never leaks via any Monitor serialization)
+
+`Monitor.heartbeat_token` carries `#[serde(skip_serializing)]` so it is absent from **every** full-
+Monitor payload — the list (`GET /api/monitors`), `get_one`, `update`, and critically the SSE
+`Event::Snapshot { monitors }` (sse.rs:22-28 broadcasts every monitor to every `/events` client on
+connect + Lagged resync). The token is fetched only via a dedicated endpoint:
+`GET /api/monitors/:id/heartbeat` → `{ "token": "...", "ping_path": "/ping/..." }` (returns 404 for a
+non-heartbeat monitor). The frontend calls it for the HeartbeatCard and right after create.
 
 ---
 
@@ -105,63 +134,76 @@ CREATE UNIQUE INDEX idx_monitors_heartbeat_token ON monitors(heartbeat_token) WH
 - [ ] **Step 3: Implement.** Append `(4, include_str!("../migrations/0004_heartbeat.sql"))` to
   `MIGRATIONS`. `models.rs`: add `Cause::Heartbeat`; add `Trigger::HeartbeatMissed` (+ `as_str` arm
   `"heartbeat_missed"`); add the 3 Monitor fields + manual FromRow rows (`heartbeat_token`/`last_ping_at`
-  via `try_get::<Option<_>>`, `heartbeat_grace_seconds` via `try_get::<i64>`); `CreateMonitorDto` +
+  via `try_get::<Option<_>>`, `heartbeat_grace_seconds` via `try_get::<i64>`). **`heartbeat_token`
+  carries `#[serde(skip_serializing)]`** so it never leaks via any Monitor payload (list, SSE
+  snapshot, update) — Task 2's dedicated endpoint returns it. `CreateMonitorDto` +
   `heartbeat_grace_seconds` with `#[serde(default = "default_grace")]` and a `fn default_grace() -> i64
   { 60 }`; `UpdateMonitorDto` + `heartbeat_grace_seconds: Option<i64>`; extend `test_defaults_monitor`.
   `engine.rs`: add `Some(Cause::Heartbeat) => "heartbeat"` to the cause→str match (~line 97).
-  `templates.rs`: add a `Trigger::HeartbeatMissed` arm to **both** `render` (line 20 — subject
-  `format!("🔴 {} missed its heartbeat", ctx.monitor_name)`, body reuse the down body) and
-  `render_alert` (line 59 — unreachable for heartbeat but must compile; return a generic
-  `(format!("Heartbeat: {}", ctx.monitor_name), String::new(), None)`). `dispatch.rs`: add
-  `Trigger::HeartbeatMissed => "down"` to `trigger_status` (line 56).
+  `templates.rs`: `render` (line 20) — add a `Trigger::HeartbeatMissed` arm to the SUBJECT match
+  only (`format!("{} missed its heartbeat", ctx.monitor_name)`; the body is built from `ctx` lines
+  after the match, so a subject arm suffices). `render_alert` (line 59) also builds its body AFTER
+  the subject match, so you **cannot** early-return a full tuple — **fold `Trigger::HeartbeatMissed`
+  into `render_alert`'s existing `Down | Recovered` (or catch-all) subject arm** (unreachable for
+  heartbeat, but must compile). `dispatch.rs`: add `Trigger::HeartbeatMissed => "down"` to
+  `trigger_status` (line 56).
 - [ ] **Step 4: Run → PASS** + `cargo test -p vigil` + `cargo clippy --all-targets -- -D warnings` (fix
   every Monitor/DTO construction site the 3 new fields break — there are several across the codebase and
   tests). **Step 5: Commit** `git commit -am "feat: migration 0004 (heartbeat cols) + Cause::Heartbeat + Trigger::HeartbeatMissed"`
 
 ---
 
-## Task 2: Validation + token generation + create()/update() persistence + list-token strip
+## Task 2: Validation + token gen + create()/update() + dedicated token endpoint + test_check guard
 
-**Files:** Modify `crates/vigil/src/api/monitors.rs` (validate_monitor_dto, create, update, list),
-`src/heartbeat.rs` (Create — `generate_token`), `src/lib.rs` (`pub mod heartbeat;`). Test:
-`tests/heartbeat_create.rs`.
+**Files:** Modify `crates/vigil/src/api/monitors.rs` (validate_monitor_dto, create, update,
+test_check, + new `get_heartbeat` handler), `src/api/mod.rs` (route), `src/heartbeat.rs`
+(`generate_token`), `src/lib.rs` (`pub mod heartbeat;`). Test: `tests/heartbeat_create.rs`.
 
-**Interfaces:** `heartbeat::generate_token() -> String`; a heartbeat monitor is created with a token,
-`confirmation_threshold=1`, `recovery_threshold=1`, `status='pending'`, `next_run_at=NULL`; the list
-endpoint never returns `heartbeat_token`.
+**Interfaces:** `heartbeat::generate_token() -> String`; a heartbeat is created with a token,
+`confirmation_threshold=1`, `recovery_threshold=1`, `status='pending'`, `next_run_at=NULL`; the token
+is NEVER serialized on a Monitor (Task 1 `skip_serializing`) and is fetched only via
+`GET /api/monitors/:id/heartbeat`.
 
-- [ ] **Step 1: Failing tests** — `tests/heartbeat_create.rs` (use `common::test_state` + the app
-  router):
-  - `create_heartbeat_generates_token_and_forces_thresholds`: POST `/api/monitors`
+- [ ] **Step 1: Failing tests** — `tests/heartbeat_create.rs` (`common::test_state` + app router):
+  - `create_heartbeat_forces_thresholds`: POST `/api/monitors`
     `{"name":"cron","type":"heartbeat","interval_seconds":3600,"heartbeat_grace_seconds":120}` → 200;
-    the returned row has a non-empty `heartbeat_token` (32 chars, alphanumeric), `status=="pending"`,
-    `confirmation_threshold==1`, `recovery_threshold==1`, `heartbeat_grace_seconds==120`.
-  - `heartbeat_rejects_ssl_and_domain`: POST with `ssl_check_enabled:true` on a heartbeat → 422.
-  - `list_endpoint_hides_heartbeat_token`: after creating a heartbeat, `GET /api/monitors` → the
-    heartbeat row's `heartbeat_token` is `null`; `GET /api/monitors/:id` → the token is present.
-  - `two_heartbeats_get_distinct_tokens`: create two → tokens differ.
+    the returned row has `status=="pending"`, `confirmation_threshold==1`, `recovery_threshold==1`,
+    `heartbeat_grace_seconds==120`, **and NO `heartbeat_token` field in the JSON** (skip_serializing).
+  - `heartbeat_token_only_via_dedicated_endpoint`: `GET /api/monitors/:id/heartbeat` → 200 with a
+    non-empty 32-char alphanumeric `token` + `ping_path` starting `/ping/`; `GET /api/monitors` (list)
+    and `GET /api/monitors/:id` JSON contain NO `heartbeat_token`; `GET
+    /api/monitors/:non_heartbeat_id/heartbeat` → 404.
+  - `heartbeat_rejects_ssl`: POST `ssl_check_enabled:true` on a heartbeat → 422.
+  - `heartbeat_rejects_domain`: POST `domain_check_enabled:true` (ssl false) on a heartbeat → 422
+    (exercises the OTHER disjunct — S4).
+  - `heartbeat_rejects_short_interval`: POST `interval_seconds:10` on a heartbeat → 422 (the ≥30 floor).
+  - `two_heartbeats_get_distinct_tokens`: create two → their `/heartbeat` tokens differ.
   Run → FAIL.
 - [ ] **Step 2: Implement.**
   - `heartbeat.rs`: `pub fn generate_token() -> String { use rand::{distributions::Alphanumeric, Rng};
     rand::thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect() }`.
-  - `validate_monitor_dto` (extend signature with `heartbeat_grace_seconds: i64` and `domain_check_enabled:
-    bool`; update the create + update call sites): add a `"heartbeat" =>` arm that requires neither
-    `url` nor `host`, requires `heartbeat_grace_seconds >= 1` and `interval_seconds >= 30`, and 422s if
-    `ssl_check_enabled || domain_check_enabled`. (The existing http/keyword/port/ping/dns/ssl arms
-    unchanged.)
-  - `create()` (the fixed-column INSERT, ~monitors.rs:156-196): when `dto.r#type == "heartbeat"`,
-    generate the token (retry the INSERT on a unique-index error, max ~3 tries) and set
-    `confirmation_threshold = 1`, `recovery_threshold = 1`, `status = "pending"`, `next_run_at = NULL`.
-    **Grow the INSERT column list + VALUES + bind chain** to include `heartbeat_token`,
-    `heartbeat_grace_seconds` (from DTO), `last_ping_at` (NULL). For non-heartbeat types, token stays
-    NULL and thresholds come from the DTO as today.
-  - `update()` (the fixed-column UPDATE, ~monitors.rs:259-297): add `heartbeat_grace_seconds` to the
-    column list + bind (grace editable). When the existing row `type == "heartbeat"`, force
-    `confirmation_threshold = 1`, `recovery_threshold = 1` regardless of the DTO.
-  - `list()` (the `/api/monitors` handler): after fetching the rows, set `heartbeat_token = None` on each
-    before returning (the detail `get_one` handler leaves it intact). Simplest: `for m in &mut rows {
-    m.heartbeat_token = None; }`.
-- [ ] **Step 3: Run → PASS** + full suite + clippy + no aws-lc. **Step 4: Commit** `git commit -am "feat: heartbeat create/validate — token gen, forced thresholds, grace, list-token strip"`
+  - `validate_monitor_dto` (extend the signature with `interval_seconds: i64`, `heartbeat_grace_seconds:
+    i64`, and `domain_check_enabled: bool`; update BOTH the create and update call sites): add a
+    `"heartbeat" =>` arm requiring neither `url` nor `host`, requiring `heartbeat_grace_seconds >= 1`
+    and `interval_seconds >= 30`, and 422 if `ssl_check_enabled || domain_check_enabled`. (Existing
+    http/keyword/port/ping/dns/ssl arms unchanged.)
+  - `create()` (INSERT ~monitors.rs:156-196): for `dto.r#type == "heartbeat"`, generate the token
+    (retry INSERT on a unique-index error, ≤3 tries) and set `confirmation_threshold = 1`,
+    `recovery_threshold = 1`, `status = "pending"`, `next_run_at = NULL`. **Grow the INSERT column
+    list + VALUES + bind chain** to include `heartbeat_token`, `heartbeat_grace_seconds` (from DTO),
+    `last_ping_at` (NULL). Non-heartbeat types: token NULL, thresholds from the DTO as today.
+  - `update()` (UPDATE ~monitors.rs:259-297): add `heartbeat_grace_seconds` to the column list + bind
+    (editable). When the existing row `type == "heartbeat"`, force `confirmation_threshold = 1`,
+    `recovery_threshold = 1` regardless of the DTO. (Token is safe in the returned Monitor — Task 1
+    `skip_serializing` — so no strip needed here.)
+  - `test_check` (monitors.rs:344 — S2 defense): early-return for `dto.r#type == "heartbeat"` with a
+    `ProbeOutcome{ ok:false, error_message:Some("n/a — heartbeat is a push monitor; it has no probe"),
+    .. }` so a direct POST doesn't fall through to `http::probe` on a null URL.
+  - **New `get_heartbeat` handler + route**: `GET /api/monitors/:id/heartbeat` → load the monitor; if
+    `type != "heartbeat"` or no token → 404; else `Json(json!({"token": token, "ping_path":
+    format!("/ping/{token}")}))`. Register `.route("/monitors/:id/heartbeat", get(monitors::get_heartbeat))`
+    in `api/mod.rs`.
+- [ ] **Step 3: Run → PASS** + full suite + clippy + no aws-lc. **Step 4: Commit** `git commit -am "feat: heartbeat create/validate — token gen (skip_serializing + dedicated endpoint), forced thresholds, grace, interval floor, test_check guard"`
 
 ---
 
@@ -183,15 +225,21 @@ endpoint never returns `heartbeat_token`.
   Run → FAIL (signature/behavior).
 - [ ] **Step 2: Implement.**
   - `apply_result`: replace the internal `let anchor = state.anchor.current().await;` (engine.rs:34)
-    with an `anchor: Connectivity` parameter. Extract the two post-commit branches into
+    with an `anchor: crate::models::Connectivity` parameter. Extract the two post-commit branches into
     `pub(crate) async fn emit_opened(state, m, incident_id, from, to, down_trigger: Trigger)` (emits
-    `IncidentOpened` + `MonitorTransition` + `MonitorUpdated`, dispatches `down_trigger`) and
+    `IncidentOpened` + `MonitorTransition`, dispatches `down_trigger`) and
     `pub(crate) async fn emit_resolved(state, m, incident_id, from, to, duration_seconds)` (emits
-    `IncidentResolved` + `MonitorTransition` + `MonitorUpdated`, dispatches `Trigger::Recovered`).
-    `apply_result`'s Opened branch chooses `down_trigger = if m.r#type == "heartbeat" {
+    `IncidentResolved` + `MonitorTransition`, dispatches `Trigger::Recovered`). **Neither helper emits
+    `MonitorUpdated`** — `apply_result` keeps its single unconditional tail `MonitorUpdated`
+    (engine.rs:189-194, carrying `out.response_time_ms`), and the heartbeat callers (Tasks 5/6) emit
+    their own. `apply_result`'s Opened branch chooses `down_trigger = if m.r#type == "heartbeat" {
     Trigger::HeartbeatMissed } else { Trigger::Down }` and calls `emit_opened`.
   - `worker::run_check`: pass `state.anchor.current().await` into `apply_result`.
-  - `tests/engine_cycle.rs:5` and `:57`: pass `vigil::anchor::Connectivity::Online`.
+  - `tests/engine_cycle.rs`: the `run_once` helper at **line 5 is called by BOTH the online AND the
+    offline test** — it must pass `state.anchor.current().await` (mirroring `worker.rs:83`), NOT a
+    literal, or the offline test's `status==Unknown`/`sent==0`/`incidents==0` assertions break. Only
+    the standalone `:57` call site (online `test_state`) may pass `Connectivity::Online`. Tests import
+    `Connectivity` via the existing `use vigil::models::*;` (engine_cycle.rs:1).
   - `bulk_set_unknown` (engine.rs:203): add `AND type != 'heartbeat'` to BOTH the SELECT (line 211) and
     the UPDATE (line 215).
 - [ ] **Step 3: Run → PASS** + full suite + clippy + no aws-lc. **Step 4: Commit** `git commit -am "feat: apply_result anchor param + reusable notify helpers + heartbeat excluded from fleet UNKNOWN + type-based down-trigger"`
@@ -231,37 +279,62 @@ endpoint never returns `heartbeat_token`.
 ## Task 5: `GET|POST /ping/:token` receiver (atomic recovery gate)
 
 **Files:** Modify `crates/vigil/src/heartbeat.rs` (`record_ping` + the axum handler), `src/app.rs`
-(route wiring — a `/ping/:token` placeholder may already exist at app.rs:46). Test: `tests/heartbeat_ping.rs`.
+(route wiring — **delete the local `async fn ping()` placeholder at app.rs:52-57**, else it is
+dead_code and `clippy -D warnings` fails). Test: `tests/heartbeat_ping.rs`.
 
 **Interfaces:** `record_ping(state, m)`; the route returns 200 on a known token, 404 on unknown.
 
-- [ ] **Step 1: Failing tests** — `tests/heartbeat_ping.rs` (app router + `common::test_state`):
+- [ ] **Step 1: Failing tests** — `tests/heartbeat_ping.rs` (app router + `common::test_state`; for
+  the recovery-notify assertion attach a channel whose triggers include `"recovered"`):
   - `ping_unknown_token_404`: `GET /ping/doesnotexist` → 404.
-  - `ping_updates_last_ping_at`: create a heartbeat; `POST /ping/:token` → 200; the row's `last_ping_at`
-    is set (non-null).
-  - `ping_recovers_down_heartbeat`: create a heartbeat, drive it DOWN (set status='down' + insert an open
-    incident); `POST /ping/:token` → 200; status → `up`, the incident is resolved (`resolved_at` set),
-    and a `recovered` notification was delivered (assert via `env.sent`/`sent_http`).
-  - `ping_up_heartbeat_no_new_incident`: an `up` heartbeat pinged again → still `up`, no incident opened,
+  - `ping_updates_last_ping_at`: create a heartbeat; `POST /ping/:token` → 200; `last_ping_at` set.
+  - `ping_recovers_down_heartbeat`: create a heartbeat, set status='down' + insert an open incident;
+    `POST /ping/:token` → 200; status → `up`, incident resolved (`resolved_at` set), a `recovered`
+    notification delivered (assert via `env.sent`).
+  - `first_ping_arms_pending_no_false_recovery`: a never-pinged `pending` heartbeat (NO open incident)
+    with a channel on `recovered`; `POST /ping/:token` → 200; status → `up`, **and NO `recovered`
+    notification delivered** and NO phantom IncidentResolved (the switch merely arms).
+  - `ping_up_heartbeat_no_new_incident`: an `up` heartbeat pinged again → still `up`, no incident,
     `last_ping_at` advanced.
-  - `ping_paused_heartbeat_stays_paused`: a `paused` heartbeat pinged → `last_ping_at` set, status stays
-    `paused`.
+  - `ping_paused_heartbeat_stays_paused`: a `paused` heartbeat pinged → `last_ping_at` set, stays `paused`.
   Run → FAIL.
-- [ ] **Step 2: Implement.**
-  - `record_ping(state, m)`: a single atomic UPDATE that both records the ping and (conditionally)
-    recovers: `UPDATE monitors SET last_ping_at = ?1, status = CASE WHEN status IN ('down','pending')
-    THEN 'up' ELSE status END, updated_at = ?1 WHERE id = ?2 RETURNING (SELECT status FROM monitors
-    WHERE id = ?2)` — or read the pre-status inside a transaction. Determine `was_down_or_pending`. If
-    so: close the open incident (`UPDATE incidents SET resolved_at=?, duration_seconds=? WHERE
-    monitor_id=? AND resolved_at IS NULL`), then `engine::emit_resolved(state, m, incident_id, from=<old>,
-    to=Up, duration)`. Otherwise emit a lightweight `Event::MonitorUpdated { id, status:<current>,
-    response_time_ms:None, checked_at:now }` (no transition, no double emit).
+- [ ] **Step 2: Implement `record_ping(state, m)` as ONE `BEGIN IMMEDIATE` transaction** (see the
+  "Heartbeat transition pattern" in Shared Types — read the pre-status under the write lock so a
+  concurrent reaper cannot interleave; a plain deferred `begin()` + SELECT is unsafe, and SQLite
+  forbids a subquery in `RETURNING`):
+  ```
+  let mut c = state.db.acquire().await?;
+  sqlx::query("BEGIN IMMEDIATE").execute(&mut *c).await?;
+  let old: String = SELECT status FROM monitors WHERE id=?;                       // under the write lock
+  UPDATE monitors SET last_ping_at=?1, updated_at=?1,
+      status = CASE WHEN status IN ('down','pending') THEN 'up' ELSE status END WHERE id=?2;
+  let mut closed: Option<(i64,i64)> = None;                                        // (incident_id, duration)
+  if old == "down" {                                                              // ONLY down has an open incident
+      if let Some((iid, started)) = SELECT id, started_at FROM incidents
+             WHERE monitor_id=? AND resolved_at IS NULL ORDER BY started_at DESC LIMIT 1 {
+          let dur = now - started;
+          UPDATE incidents SET resolved_at=?, duration_seconds=? WHERE id=?;
+          closed = Some((iid, dur));
+      }
+  }
+  sqlx::query("COMMIT").execute(&mut *c).await?;
+  // emit AFTER commit:
+  match old.as_str() {
+    "down"    => { if let Some((iid,dur)) = closed { engine::emit_resolved(state, m, iid, Status::Down, Status::Up, dur).await; }
+                   state.bus.send(MonitorUpdated{ id:m.id, status:Status::Up, response_time_ms:None, checked_at:now }); }
+    "pending" => { state.bus.send(MonitorTransition{ id:m.id, from:Status::Pending, to:Status::Up, incident_id:None });   // ARMING — no recovery notify
+                   state.bus.send(MonitorUpdated{ id:m.id, status:Status::Up, response_time_ms:None, checked_at:now }); }
+    _         => { state.bus.send(MonitorUpdated{ id:m.id, status:Status::from_db(&old), response_time_ms:None, checked_at:now }); } // up/paused/maintenance
+  }
+  ```
+  **Key:** `pending → up` is *arming*, NOT recovery — no incident to close, no `recovered` dispatch
+  (only `old == "down"` recovers). Only `emit_resolved` fires the `Recovered` notification.
   - The axum handler `async fn ping(State(state), Path(token): Path<String>) -> impl IntoResponse`:
     `SELECT * FROM monitors WHERE heartbeat_token = ?` → `StatusCode::NOT_FOUND` if none; else
-    `record_ping(&state, &m).await`; return `(StatusCode::OK, "ok")`. **Log `monitor_id`, never the
-    token.**
-  - `app.rs`: ensure `.route("/ping/:token", get(heartbeat::ping).post(heartbeat::ping))` is registered
-    on the main router BEFORE the SPA static-asset fallback (keep the colon form).
+    `record_ping(&state, &m).await`; `(StatusCode::OK, "ok")`. **Log `monitor_id`, never the token.**
+  - `app.rs`: **delete the placeholder `ping()` (app.rs:52-57)** and register
+    `.route("/ping/:token", get(heartbeat::ping).post(heartbeat::ping))` BEFORE the SPA static-asset
+    fallback (colon form; axum 0.7).
 - [ ] **Step 3: Run → PASS** + full suite + clippy. **Step 4: Commit** `git commit -am "feat: GET|POST /ping/:token receiver — atomic ping + conditional recover, 404 on unknown"`
 
 ---
@@ -275,14 +348,21 @@ endpoint never returns `heartbeat_token`.
 
 - [ ] **Step 1: Failing tests** — `tests/heartbeat_reaper.rs` (`common::test_state`):
   - `overdue_heartbeat_goes_down`: create a heartbeat (interval 60, grace 60), set `status='up'`,
-    `last_ping_at = now - 200`; `heartbeat::reap_once(&state)`; assert status → `down`, an incident with
-    `cause='heartbeat'` opened, and a `heartbeat_missed` notification delivered (via `env.sent`).
+    `last_ping_at = now - 200`; **attach a channel whose triggers JSON contains `"heartbeat_missed"`**
+    (the default seed helper hardcodes `["down","recovered"]`, which `deliver()` filters out — S3);
+    `heartbeat::reap_once(&state)`; assert status → `down`, an incident `cause='heartbeat'` opened, and
+    a `heartbeat_missed` notification delivered (via `env.sent`).
   - `within_grace_not_reaped`: `status='up'`, `last_ping_at = now - 30` (< 60+60); `reap_once`; assert
     still `up`, no incident.
   - `never_pinged_not_reaped`: `status='pending'`, `last_ping_at=NULL`, `created_at = now - 10000`;
     `reap_once`; assert still `pending`, no incident, no alert (the switch is unarmed).
+  - `fresh_ping_mid_reap_not_downed`: `status='up'` but `last_ping_at = now` (just pinged, NOT stale);
+    `reap_once`; assert still `up`, no incident (the UPDATE's staleness predicate makes rows_affected 0).
   - `already_down_not_reopened`: `status='down'` + an open incident; `reap_once`; assert still exactly
     one open incident (idempotent).
+  - `reaper_ignores_non_heartbeat`: seed an `up` http monitor (with a stale `last_checked`) + an overdue
+    heartbeat; `reap_once`; assert ONLY the heartbeat flipped to `down` (the http monitor is untouched —
+    guards the type filter against an accidental OR-loosening; S5).
   - `offline_anchor_still_reaps`: use `common::test_state_offline`; an overdue heartbeat still goes
     `down` (heartbeats aren't anchor-gated).
   Run → FAIL.
@@ -290,11 +370,16 @@ endpoint never returns `heartbeat_token`.
   - `settings_store::heartbeat_tick_seconds`: `get(pool, "heartbeat.tick_seconds", "20").await.parse().unwrap_or(20)`.
   - `reap_once`: `SELECT * FROM monitors WHERE type='heartbeat' AND is_paused=0 AND status='up' AND
     last_ping_at IS NOT NULL AND ? > last_ping_at + interval_seconds + heartbeat_grace_seconds` (bind
-    `now`). For each: atomic DOWN gate `UPDATE monitors SET status='down', updated_at=? WHERE id=? AND
-    status='up'`; if `rows_affected == 1`, `INSERT INTO incidents (monitor_id, started_at, cause,
-    error_message) VALUES (?, ?, 'heartbeat', 'no ping within interval + grace') RETURNING id`, then
-    `engine::emit_opened(state, m, incident_id, from=Up, to=Down, Trigger::HeartbeatMissed)`. Log +
-    skip per-monitor errors.
+    `now`). For each, ONE `BEGIN IMMEDIATE` transaction (Shared Types pattern — status flip + incident
+    insert together): the DOWN gate **re-asserts the staleness predicate** so a ping that refreshed
+    `last_ping_at` between the SELECT and the UPDATE makes rows_affected 0 and opens NO incident:
+    `UPDATE monitors SET status='down', updated_at=?1 WHERE id=?2 AND status='up' AND ?1 > last_ping_at
+    + interval_seconds + heartbeat_grace_seconds`; if `rows_affected == 1`, `INSERT INTO incidents
+    (monitor_id, started_at, cause, error_message) VALUES (?, ?, 'heartbeat', 'no ping within interval
+    + grace') RETURNING id` (same tx); `COMMIT`. **After commit** (only if it transitioned):
+    `engine::emit_opened(state, m, incident_id, Status::Up, Status::Down, Trigger::HeartbeatMissed)`
+    then `state.bus.send(MonitorUpdated{ id, status:Status::Down, response_time_ms:None, checked_at:now })`.
+    Log + skip per-monitor errors.
   - `run_reaper(state)`: `loop { let tick = settings_store::heartbeat_tick_seconds(&state.db).await;
     tokio::time::sleep(Duration::from_secs(tick as u64)).await; let _ = reap_once(&state).await; }`.
   - `main::serve`: `tokio::spawn(vigil::heartbeat::run_reaper(state.clone()));`.
@@ -318,15 +403,19 @@ endpoint never returns `heartbeat_token`.
     green, not muted).
   Run → FAIL.
 - [ ] **Step 2: Implement.**
-  - `stats` (monitors.rs:499-508): compute `is_heartbeat = m.r#type == "heartbeat"` (load the monitor's
-    type; the handler already has the id — one `SELECT type FROM monitors WHERE id=?` or reuse a loaded
-    row) and pass `had_any_check || is_heartbeat` into `uptime::compute`.
-  - bar builder (monitors.rs:744): for a heartbeat monitor, treat a day as `has_data` when the monitor
-    is armed (`last_ping_at IS NOT NULL`) and the day is on/after the first-ping day OR has an incident:
+  - `stats` (monitors.rs:499-508): the handler must load `type, last_ping_at` for the monitor (add
+    `SELECT type, last_ping_at FROM monitors WHERE id=?` — `stats` currently only has the id). Let
+    `is_heartbeat = type == "heartbeat"` and `armed = last_ping_at.is_some()`. Pass `had_any_check ||
+    (is_heartbeat && armed)` into `uptime::compute` — so a **never-pinged** heartbeat still reports
+    `uptime_pct: None` (matching the "waiting" UI), while an armed one gets incident-derived uptime (O1).
+  - bar builder (monitors.rs:720-758): **`bars()` does NOT currently load the Monitor** — add `SELECT
+    type, last_ping_at, created_at FROM monitors WHERE id=?` at its top. Compute `first_active_day =
+    rollup::day_str(min(created_at, last_ping_at.unwrap_or(created_at)))` — **a UTC day String** (the
+    whole bars pipeline is UTC via `rollup::day_str`/`day_bounds`; keep it a String so `day >=
+    first_active_day` typechecks — String vs i64 would not compile — O2). Then at line 744:
     `let has_data = if is_heartbeat { armed && day >= first_active_day } else { <existing expr> };`
-    where `first_active_day` = the local day of `min(created_at, last_ping_at)`. Keep the existing
-    expression for non-heartbeats. (Document the rollup limitation inline per spec §11 — heartbeat
-    uptime is incident-derived, not rollup-derived.)
+    (`armed = last_ping_at.is_some()`). Keep the existing expression for non-heartbeats. (Inline
+    comment: heartbeat uptime is incident-derived, not rollup-derived — spec §11 / O2.)
 - [ ] **Step 3: Run → PASS** + full suite + clippy. **Step 4: Commit** `git commit -am "feat: heartbeat stats/bars — incident-derived uptime (not had_any_check-gated), armed days render green"`
 
 ---
@@ -340,34 +429,40 @@ endpoint never returns `heartbeat_token`.
 
 - [ ] **Step 1: Failing tests:**
   - `form.test.tsx`: selecting type `heartbeat` → URL/host/cert-domain/threshold fields hidden, a
-    **grace-seconds** field shown, and the **Test check** button hidden; saving a new heartbeat renders a
-    **ping URL** panel containing `/ping/` + the returned token; the notifications section shows a
-    `heartbeat_missed` checkbox (checked) and no `down` checkbox; `buildDto` sends
-    `type:"heartbeat"`, `heartbeat_grace_seconds`, and NO `ssl_check_enabled`/`domain_check_enabled`.
-  - `heartbeatcard.test.tsx`: `getMonitor` returns a heartbeat with `last_ping_at` set → HeartbeatCard
-    renders the ping URL + "last ping" relative time + "next expected by"; with `last_ping_at:null` →
-    the **"Waiting for first ping"** state.
+    **grace-seconds** field shown, and the **Test check** button hidden; saving a new heartbeat fetches
+    the token from `/api/monitors/:id/heartbeat` and renders a **ping URL** panel containing `/ping/`;
+    the notifications section shows a `heartbeat_missed` checkbox (checked) and no `down` checkbox;
+    `buildDto` emits `triggers` for the attached channel equal to EXACTLY `["heartbeat_missed",
+    "recovered"]` (no stray `"down"` — O4); `buildDto` sends `type:"heartbeat"`,
+    `heartbeat_grace_seconds`, and NO `ssl_check_enabled`/`domain_check_enabled`.
+  - `heartbeatcard.test.tsx`: stub `getHeartbeat` → `{token, ping_path}` and `getMonitor` → a heartbeat
+    with `last_ping_at` set → HeartbeatCard renders the ping URL + "last ping" + "next expected by";
+    with `last_ping_at:null` → the **"Waiting for first ping"** state.
   Run `cd web && npx vitest run` → FAIL.
 - [ ] **Step 2: Implement.**
-  - `api.ts`: no new endpoint (reuse `getMonitor`/`createMonitor`); add a `pingUrl(token)` helper
-    returning `${window.location.origin}/ping/${token}`.
+  - `api.ts`: add `getHeartbeat(id): Promise<{token:string, ping_path:string}>` → `fetch('/api/monitors/'+id+'/heartbeat').then(json)`;
+    and a `pingUrl(path)` helper returning `${window.location.origin}${path}`. (The token is NOT on the
+    Monitor object — it comes only from this endpoint.)
   - `MonitorForm.tsx`: add `{label:"Heartbeat", value:"heartbeat"}` to `MONITOR_TYPES`. Wrap URL/host/
-    method/keyword/DNS/**Certificate&Domain section**/**confirmation+recovery inputs** in `Show
-    when={type()!=='heartbeat'}`. Add a `heartbeat_grace_seconds` numeric input shown `when={type()===
-    'heartbeat'}` (signal `graceSeconds`, default 60). Hide the **Test check** button for heartbeat.
-    `buildDto`: for heartbeat, include `heartbeat_grace_seconds`, and do NOT append
-    `ssl_check_enabled`/`domain_check_enabled`. On successful save of a NEW heartbeat, show a panel with
-    the copyable ping URL (`pingUrl(saved.heartbeat_token)`), a copy button, and `curl -fsS <url>`. In
-    the notifications `NotifRow`, for a heartbeat monitor default the row to `{attached, heartbeat_missed:
-    true, recovered:true}` and render a `heartbeat_missed` checkbox instead of `down` (extend `NotifRow`
-    with `heartbeat_missed:boolean`, `selectedNotifications` emits `"heartbeat_missed"`; strings must
-    match the backend exactly).
-  - `HeartbeatCard.tsx` (new): props `{monitor}`; shows the ping URL (copy), **last ping** (relative +
-    absolute), **next expected by** (`last_ping_at + interval_seconds + heartbeat_grace_seconds`, or
-    "—"), and a **"Waiting for first ping"** state when `last_ping_at == null`.
-  - `DetailPanel.tsx`: mount `<HeartbeatCard>` gated `type==='heartbeat'`; give the **Now strip** a
-    heartbeat variant — replace the response-time + last-checked tiles with **last-ping** +
-    **next-expected-by** when `type==='heartbeat'`; hide the **Check now** action for heartbeat.
+    method/keyword/DNS/**Certificate&Domain section**/**confirmation+recovery inputs**/**ResponseChart**
+    (S6 — heartbeats have no `/series`) in `Show when={type()!=='heartbeat'}`. Add a
+    `heartbeat_grace_seconds` numeric input shown `when={type()==='heartbeat'}` (signal `graceSeconds`,
+    default 60). Hide the **Test check** button for heartbeat. `buildDto`: for heartbeat, include
+    `heartbeat_grace_seconds`, do NOT append `ssl_check_enabled`/`domain_check_enabled`. On successful
+    save of a NEW heartbeat, call `getHeartbeat(saved.id)` and show a panel with the copyable ping URL
+    (`pingUrl(hb.ping_path)`), a copy button, and `curl -fsS <url>`. In the notifications `NotifRow`,
+    for a heartbeat monitor render a `heartbeat_missed` checkbox **instead of** `down`: extend
+    `NotifRow` with `heartbeat_missed:boolean`; a heartbeat row defaults to `{attached, down:false,
+    heartbeat_missed:true, recovered:true}` and `selectedNotifications` emits `"heartbeat_missed"` (and
+    NOT `"down"`) for heartbeat monitors — strings must match `Trigger::as_str` exactly.
+  - `HeartbeatCard.tsx` (new): props `{monitor}`; on mount `getHeartbeat(monitor.id)` for the URL; shows
+    the ping URL (copy), **last ping** (relative + absolute), **next expected by** (`last_ping_at +
+    interval_seconds + heartbeat_grace_seconds`, or "—"), and a **"Waiting for first ping"** state when
+    `last_ping_at == null`.
+  - `DetailPanel.tsx`: mount `<HeartbeatCard>` gated `type==='heartbeat'`; gate the existing
+    `<ResponseChart>` on `type!=='heartbeat'` (S6); give the **Now strip** a heartbeat variant — replace
+    the response-time + last-checked tiles with **last-ping** + **next-expected-by** when
+    `type==='heartbeat'`; hide the **Check now** action for heartbeat.
   - `MonitorCard.tsx` / `ListView.tsx`: for heartbeat monitors, render **last ping** ("2m ago") in place
     of the response-time/sparkline slot.
 - [ ] **Step 3: Run → PASS** + `npx tsc --noEmit` + `npx vite build`. **Step 4: Commit** `git commit -am "feat(web): heartbeat monitor type — form + ping URL + HeartbeatCard + Now-strip/list last-ping + heartbeat_missed trigger"`
@@ -379,9 +474,10 @@ endpoint never returns `heartbeat_token`.
 **Files:** Create `docs/superpowers/plans/P4.1-acceptance.md`. No product code unless a DoD item fails.
 
 - [ ] **Step 1** — `0004` on a real P1/P2/P3 DB copy: version=4, data preserved.
-- [ ] **Step 2 (live via Docker)** — create a heartbeat monitor (interval 60, grace 30); `GET
-  /api/monitors` shows its token as `null`, `GET /api/monitors/:id` shows the token; `POST
-  /ping/:token` → 200, `last_ping_at` set, status → `up`.
+- [ ] **Step 2 (live via Docker)** — create a heartbeat monitor (interval 60, grace 30); confirm
+  `GET /api/monitors` and `GET /api/monitors/:id` JSON contain NO `heartbeat_token`, and `GET
+  /api/monitors/:id/heartbeat` returns `{token, ping_path}`; `POST /ping/<token>` → 200, `last_ping_at`
+  set, status → `up`.
 - [ ] **Step 3 (live)** — stop pinging; after `interval+grace+tick`, the reaper drives it `down` with a
   `heartbeat` incident; ping again → recovers to `up` (incident resolved). Watch the SSE/detail update.
 - [ ] **Step 4** — a heartbeat with `ssl_check_enabled:true` → 422; `check-now` on a heartbeat → rejected/no-op.
