@@ -29,13 +29,23 @@ const incidents = [
   },
 ];
 
-test("renders ongoing + resolved incidents; acknowledge posts to the ack endpoint", async () => {
+test("renders ongoing + resolved incidents; acknowledge posts to the ack endpoint and the refetch removes the button", async () => {
+  // Stateful mock: the ongoing incident (id 2) starts unacknowledged. Once
+  // the acknowledge POST fires, subsequent getIncidents calls (the
+  // component's post-acknowledge refetch) return it as acknowledged, so we
+  // can prove the UI actually updates from the refetch rather than just
+  // that the POST was sent.
+  let acknowledged = false;
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.includes("/acknowledge")) {
+      acknowledged = true;
       return { ok: true, json: async () => ({ ok: true }) } as any;
     }
     if (url.includes("/api/incidents")) {
-      return { ok: true, json: async () => incidents } as any;
+      const current = acknowledged
+        ? incidents.map((inc) => (inc.id === 2 ? { ...inc, acknowledged: true } : inc))
+        : incidents;
+      return { ok: true, json: async () => current } as any;
     }
     return { ok: true, json: async () => [] } as any;
   });
@@ -60,6 +70,13 @@ test("renders ongoing + resolved incidents; acknowledge posts to the ack endpoin
     expect(ackCall).toBeTruthy();
     expect(String(ackCall![0])).toContain("/api/incidents/2/acknowledge");
     expect((ackCall![1] as RequestInit)?.method).toBe("POST");
+  });
+
+  // After the refetch settles, the now-acknowledged incident no longer
+  // renders an Acknowledge button — this is the part the old test never
+  // proved, since its mock always returned acknowledged:false.
+  await vi.waitFor(() => {
+    expect(screen.queryByText(/acknowledge/i)).toBeNull();
   });
 });
 
