@@ -1,4 +1,4 @@
-import { createMemo, createResource, createSignal, For, Show, type Component } from "solid-js";
+import { createMemo, createResource, createSignal, For, onCleanup, Show, type Component } from "solid-js";
 import * as api from "../api";
 import type { Stats } from "../api";
 import UptimeBar from "./UptimeBar";
@@ -75,6 +75,22 @@ interface RowStats {
   d30: Stats | null;
 }
 
+/**
+ * Null-safe numeric comparator: nulls sort as smallest, and two nulls are
+ * equal (returns 0) rather than the `(a ?? -Infinity) - (b ?? -Infinity)`
+ * idiom, which produces `-Infinity - -Infinity === NaN` — a comparator that
+ * returns NaN gives Array.prototype.sort undefined (browser-dependent)
+ * ordering instead of a stable ascending/descending sort.
+ */
+function numCompare(a: number | null | undefined, b: number | null | undefined): number {
+  const an = a ?? null;
+  const bn = b ?? null;
+  if (an == null && bn == null) return 0;
+  if (an == null) return -1;
+  if (bn == null) return 1;
+  return an - bn;
+}
+
 const HEADERS: { key: Exclude<SortCol, null>; label: string; right?: boolean }[] = [
   { key: "name", label: "Name" },
   { key: "type", label: "Type" },
@@ -111,7 +127,7 @@ const ListView: Component<ListViewProps> = (props) => {
   // hundred monitors); would want batching into a single backend endpoint
   // before that.
   const idsKey = createMemo(() => props.monitors.map((m) => m.id).join(","));
-  const [statsMap] = createResource(idsKey, async () => {
+  const [statsMap, { refetch: refetchStats }] = createResource(idsKey, async () => {
     const map: Record<number, RowStats> = {};
     await Promise.all(
       props.monitors.map(async (m) => {
@@ -132,6 +148,17 @@ const ListView: Component<ListViewProps> = (props) => {
     return typeof v === "number" ? v : null;
   }
 
+  // Live SSE response_time_ms wins when present; otherwise fall back to the
+  // 24h stats average, mirroring MonitorCard.responseMs() so the column
+  // isn't blank until the monitor's first scheduled check.
+  function responseMsFor(m: any): number | null {
+    const live = m.response_time_ms;
+    if (typeof live === "number") return live;
+    const avg = statsMap()?.[m.id]?.h24?.avg_ms;
+    if (typeof avg === "number") return avg;
+    return null;
+  }
+
   const sortedMonitors = createMemo(() => {
     const list = props.monitors.slice();
     const s = sort();
@@ -150,19 +177,19 @@ const ListView: Component<ListViewProps> = (props) => {
           cmp = String(a.type ?? "").localeCompare(String(b.type ?? ""));
           break;
         case "last_checked_at":
-          cmp = (a.last_checked_at ?? -Infinity) - (b.last_checked_at ?? -Infinity);
+          cmp = numCompare(a.last_checked_at, b.last_checked_at);
           break;
         case "response_time_ms":
-          cmp = (a.response_time_ms ?? -Infinity) - (b.response_time_ms ?? -Infinity);
+          cmp = numCompare(a.response_time_ms, b.response_time_ms);
           break;
         case "uptime_24h":
-          cmp = (uptimeFor(a.id, "h24") ?? -Infinity) - (uptimeFor(b.id, "h24") ?? -Infinity);
+          cmp = numCompare(uptimeFor(a.id, "h24"), uptimeFor(b.id, "h24"));
           break;
         case "uptime_7d":
-          cmp = (uptimeFor(a.id, "d7") ?? -Infinity) - (uptimeFor(b.id, "d7") ?? -Infinity);
+          cmp = numCompare(uptimeFor(a.id, "d7"), uptimeFor(b.id, "d7"));
           break;
         case "uptime_30d":
-          cmp = (uptimeFor(a.id, "d30") ?? -Infinity) - (uptimeFor(b.id, "d30") ?? -Infinity);
+          cmp = numCompare(uptimeFor(a.id, "d30"), uptimeFor(b.id, "d30"));
           break;
         default:
           cmp = 0;
@@ -176,11 +203,17 @@ const ListView: Component<ListViewProps> = (props) => {
 
   function toggleMenu(id: number, e: MouseEvent) {
     e.stopPropagation();
-    setMenuOpenId((cur) => (cur === id ? null : id));
+    setMenuOpenId((cur) => {
+      const next = cur === id ? null : id;
+      if (next !== null) document.addEventListener("click", closeMenu, { once: true });
+      return next;
+    });
   }
   function closeMenu() {
     setMenuOpenId(null);
   }
+
+  onCleanup(() => document.removeEventListener("click", closeMenu));
 
   async function runAction(fn: () => Promise<any>, e: MouseEvent) {
     e.stopPropagation();
@@ -188,6 +221,7 @@ const ListView: Component<ListViewProps> = (props) => {
     try {
       await fn();
     } finally {
+      refetchStats();
       props.onChanged?.();
     }
   }
@@ -204,8 +238,7 @@ const ListView: Component<ListViewProps> = (props) => {
       when={props.monitors.length > 0}
       fallback={<div class="empty-state">No monitors match. Add your first monitor to get started.</div>}
     >
-      {/* eslint-disable-next-line */}
-      <div class="list-view" onClick={closeMenu}>
+      <div class="list-view">
         <table class="monitor-table">
           <thead>
             <tr>
@@ -257,8 +290,8 @@ const ListView: Component<ListViewProps> = (props) => {
                     {relativeFrom(m.last_checked_at)}
                   </td>
                   <td class="mono align-right">
-                    <Show when={typeof m.response_time_ms === "number"} fallback="—">
-                      {Math.round(m.response_time_ms)}
+                    <Show when={responseMsFor(m) != null} fallback="—">
+                      {Math.round(responseMsFor(m) as number)}
                       <span class="unit">ms</span>
                     </Show>
                   </td>
