@@ -18,6 +18,11 @@
 
 use std::time::Duration;
 
+/// User-Agent sent on RDAP requests. rdap.org sits behind Cloudflare and
+/// returns 403 to requests with no User-Agent, so this is not optional — an
+/// identifying UA is what keeps domain-expiry lookups from being blocked.
+const RDAP_USER_AGENT: &str = concat!("vigil-monitor/", env!("CARGO_PKG_VERSION"), " (+https://github.com/vigil; self-hosted uptime & cert monitor)");
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -200,10 +205,24 @@ pub async fn check(host: &str, timeout_secs: u64) -> DomainResult {
     let d = registrable_domain(host);
     let timeout = Duration::from_secs(timeout_secs);
 
-    let client = reqwest::Client::builder().timeout(timeout).build().unwrap_or_else(|_| reqwest::Client::new());
+    // rdap.org (Cloudflare-fronted) returns 403 to requests without a
+    // User-Agent, so a UA-less client would get every RDAP lookup blocked and
+    // classified transient — the domain-expiry feature would silently never
+    // work. Set the UA on both the client and the request (the latter also
+    // covers the rare Client::new() fallback below).
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(RDAP_USER_AGENT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     let url = format!("https://rdap.org/domain/{d}");
-    let response = client.get(&url).header(reqwest::header::ACCEPT, "application/rdap+json").send().await;
+    let response = client
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/rdap+json")
+        .header(reqwest::header::USER_AGENT, RDAP_USER_AGENT)
+        .send()
+        .await;
 
     match response {
         Ok(resp) => {
