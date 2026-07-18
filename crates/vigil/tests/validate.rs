@@ -91,3 +91,28 @@ async fn test_check_dispatches_through_probe_run_for_http() {
 
     assert_eq!(out["ok"], serde_json::Value::Bool(true), "expected ok:true, got {out}");
 }
+
+/// Task 3: the `tcp` prober is now real. Proves `/test-check` dispatches
+/// `port` monitors through `probe::run` into `probe::tcp::probe` (not just
+/// the `http` arm exercised above) by connecting to a bound loopback
+/// listener and asserting a real successful TCP connect.
+#[tokio::test]
+async fn test_check_dispatches_through_probe_run_for_port() {
+    let env = test_state().await;
+    let a = serve(env.state.clone()).await;
+
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p = l.local_addr().unwrap().port();
+
+    let out: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://{a}/api/monitors/test-check"))
+        .json(&serde_json::json!({"name":"t","type":"port","host":"127.0.0.1","port":p}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(out["ok"], serde_json::Value::Bool(true), "expected ok:true, got {out}");
+}
