@@ -43,8 +43,9 @@ pub async fn create(
     State(state): State<AppState>,
     Json(dto): Json<CreateMonitorDto>,
 ) -> ApiResult<Monitor> {
-    // P1 monitors are always type='http'; the DTO has no `type` field.
-    if dto.url.trim().is_empty() {
+    // Per-type validation lands in Task 2; for now, preserve P1's "url
+    // required" behavior (every monitor created today is effectively http).
+    if dto.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "url is required".to_string()));
     }
     if dto.interval_seconds < 15 {
@@ -55,12 +56,14 @@ pub async fn create(
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO monitors (name, type, url, method, headers, body, auth_type, auth_ref, \
          expected_status_codes, interval_seconds, timeout_seconds, follow_redirects, verify_ssl, \
-         confirmation_threshold, recovery_threshold, retry_interval_seconds, status, is_paused, \
-         created_at, updated_at) \
-         VALUES (?, 'http', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?) \
+         confirmation_threshold, recovery_threshold, retry_interval_seconds, \
+         host, port, keyword, keyword_mode, keyword_case_sensitive, dns_record_type, dns_expected_value, \
+         status, is_paused, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?) \
          RETURNING id",
     )
     .bind(&dto.name)
+    .bind(&dto.r#type)
     .bind(&dto.url)
     .bind(&dto.method)
     .bind(&dto.headers)
@@ -75,6 +78,13 @@ pub async fn create(
     .bind(dto.confirmation_threshold)
     .bind(dto.recovery_threshold)
     .bind(dto.retry_interval_seconds)
+    .bind(&dto.host)
+    .bind(dto.port)
+    .bind(&dto.keyword)
+    .bind(&dto.keyword_mode)
+    .bind(dto.keyword_case_sensitive)
+    .bind(&dto.dns_record_type)
+    .bind(&dto.dns_expected_value)
     .bind(ts)
     .bind(ts)
     .fetch_one(&state.db)
@@ -120,13 +130,23 @@ pub async fn update(
     let confirmation_threshold = dto.confirmation_threshold.unwrap_or(existing.confirmation_threshold);
     let recovery_threshold = dto.recovery_threshold.unwrap_or(existing.recovery_threshold);
     let retry_interval_seconds = dto.retry_interval_seconds.unwrap_or(existing.retry_interval_seconds);
+    // `type` is NOT mutable on edit — set once at create; the form disables
+    // the type selector in edit mode, so UpdateMonitorDto has no `type` field.
+    let host = dto.host.or(existing.host);
+    let port = dto.port.or(existing.port);
+    let keyword = dto.keyword.or(existing.keyword);
+    let keyword_mode = dto.keyword_mode.or(existing.keyword_mode);
+    let keyword_case_sensitive = dto.keyword_case_sensitive.unwrap_or(existing.keyword_case_sensitive);
+    let dns_record_type = dto.dns_record_type.or(existing.dns_record_type);
+    let dns_expected_value = dto.dns_expected_value.or(existing.dns_expected_value);
 
     let ts = now();
     sqlx::query(
         "UPDATE monitors SET name=?, url=?, method=?, headers=?, body=?, auth_type=?, auth_ref=?, \
          expected_status_codes=?, interval_seconds=?, timeout_seconds=?, follow_redirects=?, \
          verify_ssl=?, confirmation_threshold=?, recovery_threshold=?, retry_interval_seconds=?, \
-         updated_at=? WHERE id=?",
+         host=?, port=?, keyword=?, keyword_mode=?, keyword_case_sensitive=?, dns_record_type=?, \
+         dns_expected_value=?, updated_at=? WHERE id=?",
     )
     .bind(&name)
     .bind(&url)
@@ -143,6 +163,13 @@ pub async fn update(
     .bind(confirmation_threshold)
     .bind(recovery_threshold)
     .bind(retry_interval_seconds)
+    .bind(&host)
+    .bind(port)
+    .bind(&keyword)
+    .bind(&keyword_mode)
+    .bind(keyword_case_sensitive)
+    .bind(&dns_record_type)
+    .bind(&dns_expected_value)
     .bind(ts)
     .bind(id)
     .execute(&state.db)
@@ -197,7 +224,7 @@ pub async fn check_now(State(state): State<AppState>, Path(id): Path<i64>) -> Ap
 pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome> {
     let mut m = crate::models::test_defaults_monitor();
     m.name = dto.name;
-    m.url = Some(dto.url);
+    m.url = dto.url;
     m.method = dto.method;
     m.headers = dto.headers;
     m.body = dto.body;

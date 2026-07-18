@@ -84,6 +84,13 @@ pub struct Monitor {
     pub confirmation_threshold: i64,
     pub recovery_threshold: i64,
     pub retry_interval_seconds: i64,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+    pub keyword: Option<String>,
+    pub keyword_mode: Option<String>,
+    pub keyword_case_sensitive: bool,
+    pub dns_record_type: Option<String>,
+    pub dns_expected_value: Option<String>,
     pub status: Status,
     pub is_paused: bool,
     pub last_checked_at: Option<Ts>,
@@ -103,6 +110,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Monitor {
         let follow_redirects_raw: i64 = row.try_get("follow_redirects")?;
         let verify_ssl_raw: i64 = row.try_get("verify_ssl")?;
         let is_paused_raw: i64 = row.try_get("is_paused")?;
+        let keyword_case_sensitive_raw: i64 = row.try_get("keyword_case_sensitive")?;
         Ok(Monitor {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
@@ -121,6 +129,13 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Monitor {
             confirmation_threshold: row.try_get("confirmation_threshold")?,
             recovery_threshold: row.try_get("recovery_threshold")?,
             retry_interval_seconds: row.try_get("retry_interval_seconds")?,
+            host: row.try_get("host")?,
+            port: row.try_get("port")?,
+            keyword: row.try_get("keyword")?,
+            keyword_mode: row.try_get("keyword_mode")?,
+            keyword_case_sensitive: keyword_case_sensitive_raw != 0,
+            dns_record_type: row.try_get("dns_record_type")?,
+            dns_expected_value: row.try_get("dns_expected_value")?,
             status: Status::from_db(&status_raw),
             is_paused: is_paused_raw != 0,
             last_checked_at: row.try_get("last_checked_at")?,
@@ -131,6 +146,37 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Monitor {
             sort_order: row.try_get("sort_order")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Incident {
+    pub id: i64,
+    pub monitor_id: i64,
+    pub started_at: Ts,
+    pub resolved_at: Option<Ts>,
+    pub duration_seconds: Option<i64>,
+    pub cause: Option<String>,
+    pub status_code: Option<i64>,
+    pub error_message: Option<String>,
+    pub acknowledged: bool,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Incident {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        let acknowledged_raw: i64 = row.try_get("acknowledged")?;
+        Ok(Incident {
+            id: row.try_get("id")?,
+            monitor_id: row.try_get("monitor_id")?,
+            started_at: row.try_get("started_at")?,
+            resolved_at: row.try_get("resolved_at")?,
+            duration_seconds: row.try_get("duration_seconds")?,
+            cause: row.try_get("cause")?,
+            status_code: row.try_get("status_code")?,
+            error_message: row.try_get("error_message")?,
+            acknowledged: acknowledged_raw != 0,
         })
     }
 }
@@ -167,11 +213,16 @@ fn d_rec() -> i64 {
 fn d_retry() -> i64 {
     30
 }
+fn d_http() -> String {
+    "http".to_string()
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateMonitorDto {
     pub name: String,
-    pub url: String,
+    #[serde(default = "d_http")]
+    pub r#type: String,
+    pub url: Option<String>,
     #[serde(default = "d_method")]
     pub method: String,
     pub headers: Option<String>,
@@ -194,6 +245,14 @@ pub struct CreateMonitorDto {
     pub recovery_threshold: i64,
     #[serde(default = "d_retry")]
     pub retry_interval_seconds: i64,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+    pub keyword: Option<String>,
+    pub keyword_mode: Option<String>,
+    #[serde(default)]
+    pub keyword_case_sensitive: bool,
+    pub dns_record_type: Option<String>,
+    pub dns_expected_value: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -213,6 +272,13 @@ pub struct UpdateMonitorDto {
     pub confirmation_threshold: Option<i64>,
     pub recovery_threshold: Option<i64>,
     pub retry_interval_seconds: Option<i64>,
+    pub host: Option<String>,
+    pub port: Option<i64>,
+    pub keyword: Option<String>,
+    pub keyword_mode: Option<String>,
+    pub keyword_case_sensitive: Option<bool>,
+    pub dns_record_type: Option<String>,
+    pub dns_expected_value: Option<String>,
 }
 
 /// Fully-defaulted http Monitor fixture for tests in later tasks.
@@ -235,6 +301,13 @@ pub fn test_defaults_monitor() -> Monitor {
         confirmation_threshold: 3,
         recovery_threshold: 1,
         retry_interval_seconds: 30,
+        host: None,
+        port: None,
+        keyword: None,
+        keyword_mode: None,
+        keyword_case_sensitive: false,
+        dns_record_type: None,
+        dns_expected_value: None,
         status: Status::Pending,
         is_paused: false,
         last_checked_at: None,
