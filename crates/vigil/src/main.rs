@@ -64,6 +64,7 @@ async fn serve() {
 
     let bus = tokio::sync::broadcast::channel(1024).0;
     let transport = Arc::new(notify::SmtpTransport::new(secrets::read_smtp_password()));
+    let http_sender = Arc::new(notify::http::ReqwestHttpSender::new());
     let (sched_tx, sched_rx) = tokio::sync::mpsc::unbounded_channel();
     let anchors = settings_store::anchors(&pool).await;
     let anchor = Arc::new(AnchorGate::new(anchors, bus.clone()));
@@ -72,6 +73,7 @@ async fn serve() {
         db: pool,
         bus,
         transport,
+        http_sender,
         sched_tx,
         anchor: anchor.clone(),
     };

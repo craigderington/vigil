@@ -43,16 +43,22 @@ pub enum Cause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Trigger {
     Down,
     Recovered,
+    SslExpiring,
+    SslInvalid,
+    DomainExpiring,
 }
 impl Trigger {
     pub fn as_str(&self) -> &'static str {
         match self {
             Trigger::Down => "down",
             Trigger::Recovered => "recovered",
+            Trigger::SslExpiring => "ssl_expiring",
+            Trigger::SslInvalid => "ssl_invalid",
+            Trigger::DomainExpiring => "domain_expiring",
         }
     }
 }

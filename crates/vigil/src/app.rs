@@ -10,6 +10,7 @@ pub struct AppState {
     pub db: sqlx::SqlitePool,
     pub bus: crate::events::Bus,
     pub transport: Arc<dyn crate::notify::Transport>,
+    pub http_sender: Arc<dyn crate::notify::HttpSender>,
     pub sched_tx: tokio::sync::mpsc::UnboundedSender<SchedCmd>,
     pub anchor: Arc<crate::anchor::AnchorGate>,
 }

@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 use super::{db_err, now};
 use crate::app::AppState;
-use crate::notify::{EmailMsg, SmtpConfig};
+use crate::notify::{EmailMsg, NotifyMsg, SmtpConfig};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -111,7 +111,10 @@ pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
 }
 
 /// The subset of `notification_channels.config` (type='email') needed to
-/// send a test message: `{host, port, security, from, to[]}`.
+/// send a test message: `{host, port, security, from, to[], username?}`.
+/// `username` is optional — see the identical copy in `notify/dispatch.rs`
+/// (kept in sync deliberately rather than unified, per the existing
+/// pre-P3 duplication).
 #[derive(Deserialize)]
 struct EmailChannelConfig {
     host: String,
@@ -119,30 +122,61 @@ struct EmailChannelConfig {
     security: String,
     from: String,
     to: Vec<String>,
+    #[serde(default)]
+    username: Option<String>,
 }
 
+/// Sends a real test notification over the channel's actual transport:
+/// email via `Transport`, everything else (webhook/discord/ntfy) via
+/// `HttpSender`, routed by `row.r#type`.
 pub async fn test(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
     let row = fetch_channel(&state.db, id).await.map_err(db_err)?.ok_or_else(not_found)?;
 
-    let cfg: EmailChannelConfig = match serde_json::from_str(&row.config) {
-        Ok(c) => c,
-        Err(e) => return Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+    let result: anyhow::Result<()> = if row.r#type == "email" {
+        match serde_json::from_str::<EmailChannelConfig>(&row.config) {
+            Ok(cfg) => {
+                let smtp_cfg = SmtpConfig {
+                    host: cfg.host,
+                    port: cfg.port,
+                    security: cfg.security,
+                    username: cfg.username,
+                };
+                let msg = EmailMsg {
+                    to: cfg.to,
+                    from: cfg.from,
+                    subject: "Vigil test email".to_string(),
+                    body_text: "This is a test from Vigil.".to_string(),
+                    body_html: None,
+                };
+                state.transport.send(&smtp_cfg, &msg).await
+            }
+            Err(e) => Err(e.into()),
+        }
+    } else {
+        match serde_json::from_str::<Value>(&row.config) {
+            Ok(cfg) => {
+                let msg = NotifyMsg {
+                    monitor_name: "Vigil test".to_string(),
+                    url: String::new(),
+                    status: "test".to_string(),
+                    status_code: None,
+                    error: None,
+                    response_time_ms: None,
+                    duration: None,
+                    ssl_days: None,
+                    domain_days: None,
+                    checked_at: now(),
+                    incident_url: None,
+                    subject: "Vigil test notification".to_string(),
+                    body: "This is a test from Vigil.".to_string(),
+                    body_html: None,
+                };
+                state.http_sender.send(&row.r#type, &cfg, &msg).await
+            }
+            Err(e) => Err(e.into()),
+        }
     };
 
-    let smtp_cfg = SmtpConfig {
-        host: cfg.host,
-        port: cfg.port,
-        security: cfg.security,
-    };
-    let msg = EmailMsg {
-        to: cfg.to,
-        from: cfg.from,
-        subject: "Vigil test email".to_string(),
-        body_text: "This is a test from Vigil.".to_string(),
-        body_html: None,
-    };
-
-    let result = state.transport.send(&smtp_cfg, &msg).await;
     Ok(Json(json!({
         "ok": result.is_ok(),
         "error": result.err().map(|e| e.to_string()),

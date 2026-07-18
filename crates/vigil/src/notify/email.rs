@@ -33,7 +33,10 @@ impl Transport for SmtpTransport {
         };
 
         let builder = if let Some(password) = &self.password {
-            builder.credentials(Credentials::new(msg.from.clone(), password.clone()))
+            builder.credentials(Credentials::new(
+                super::auth_user(&cfg.username, &msg.from),
+                password.clone(),
+            ))
         } else {
             builder
         };

@@ -1,7 +1,10 @@
-//! Turns a state-machine transition into sent (or suppressed) notification
-//! mail: loads the monitor's active email channels, filters by
-//! per-trigger opt-in, applies the (monitor, trigger) cooldown, renders
-//! and sends, then logs the outcome to `notification_log`.
+//! Turns a state-machine transition (or an SSL/domain add-on alert) into a
+//! rendered `NotifyMsg`, then hands it to `deliver` — the multi-channel
+//! core that loads every active channel attached to the monitor (any
+//! `notification_channels.type`, not just `email`), filters by per-trigger
+//! opt-in, applies the per-`(monitor, channel, trigger)` cooldown, routes
+//! to `Transport` (email) or `HttpSender` (webhook/discord/ntfy), and logs
+//! the outcome to `notification_log`.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,7 +13,7 @@ use serde::Deserialize;
 use crate::app::AppState;
 use crate::cooldown;
 use crate::models::{Monitor, Trigger};
-use crate::notify::{templates, EmailMsg, SmtpConfig, TemplateCtx};
+use crate::notify::{templates, AlertCtx, EmailMsg, NotifyMsg, SmtpConfig, TemplateCtx};
 use crate::settings_store;
 
 fn now() -> i64 {
@@ -25,12 +28,15 @@ fn now() -> i64 {
 #[derive(sqlx::FromRow)]
 struct AttachedChannel {
     channel_id: i64,
+    channel_type: String,
     config: String,
     triggers: String,
 }
 
 /// The subset of `notification_channels.config` (type='email') needed to
-/// send: `{host, port, security, from, to[]}`.
+/// send: `{host, port, security, from, to[], username?}`. `username` is
+/// optional — most SMTP relays authenticate with the From address, but some
+/// (Mailgun, SendGrid, etc.) require a separate account/API-key username.
 #[derive(Deserialize)]
 struct EmailChannelConfig {
     host: String,
@@ -38,37 +44,123 @@ struct EmailChannelConfig {
     security: String,
     from: String,
     to: Vec<String>,
+    #[serde(default)]
+    username: Option<String>,
 }
 
 /// The status a trigger settles the monitor into, for template rendering.
+/// Only meaningful on the up/down transition path (`on_transition`); the
+/// SSL/domain add-on triggers don't settle an up/down status, so they fall
+/// back to a generic label rather than `unreachable!()` — a future caller
+/// reusing this on that path shouldn't panic.
 fn trigger_status(trigger: Trigger) -> &'static str {
     match trigger {
         Trigger::Down => "down",
         Trigger::Recovered => "up",
+        Trigger::SslExpiring | Trigger::SslInvalid | Trigger::DomainExpiring => "alert",
     }
 }
 
+/// Renders the up/down transition `NotifyMsg` and delivers it to every
+/// attached channel.
 pub async fn on_transition(
     state: &AppState,
     m: &Monitor,
     trigger: Trigger,
     incident_id: Option<i64>,
 ) -> anyhow::Result<()> {
-    let now = now();
+    let checked_at = now();
 
+    let ctx = TemplateCtx {
+        monitor_name: m.name.clone(),
+        url: m.url.clone().unwrap_or_default(),
+        status: trigger_status(trigger).to_string(),
+        status_code: None,
+        error: None,
+        response_time_ms: None,
+        duration: None,
+        checked_at,
+    };
+    let (subject, body_text, body_html) = templates::render(trigger, &ctx);
+
+    let msg = NotifyMsg {
+        monitor_name: ctx.monitor_name.clone(),
+        url: ctx.url.clone(),
+        status: ctx.status.clone(),
+        status_code: ctx.status_code,
+        error: ctx.error.clone(),
+        response_time_ms: ctx.response_time_ms,
+        duration: ctx.duration,
+        ssl_days: None,
+        domain_days: None,
+        checked_at: ctx.checked_at,
+        incident_url: None,
+        subject,
+        body: body_text,
+        body_html,
+    };
+
+    deliver(state, m, trigger, &msg, incident_id).await
+}
+
+/// Renders the SSL/domain add-on alert `NotifyMsg` and delivers it to every
+/// attached channel. No incident is associated with these alerts (they
+/// don't open/close `incidents` rows), so `incident_id` is always `None`.
+pub async fn send_alert(
+    state: &AppState,
+    m: &Monitor,
+    trigger: Trigger,
+    ctx: &AlertCtx,
+) -> anyhow::Result<()> {
+    let (subject, body_text, body_html) = templates::render_alert(trigger, ctx);
+
+    let msg = NotifyMsg {
+        monitor_name: ctx.monitor_name.clone(),
+        url: ctx.url.clone(),
+        status: trigger.as_str().to_string(),
+        status_code: None,
+        error: ctx.error.clone(),
+        response_time_ms: None,
+        duration: None,
+        ssl_days: ctx.ssl_days,
+        domain_days: ctx.domain_days,
+        checked_at: ctx.checked_at,
+        incident_url: None,
+        subject,
+        body: body_text,
+        body_html,
+    };
+
+    deliver(state, m, trigger, &msg, None).await
+}
+
+/// The multi-channel delivery core. Loads every active channel attached to
+/// `m` (any type), filters to those opted into `trigger`, applies the
+/// per-`(monitor, channel, trigger)` cooldown, sends via `Transport`
+/// (email) or `HttpSender` (everything else), and logs each attempt.
+pub async fn deliver(
+    state: &AppState,
+    m: &Monitor,
+    trigger: Trigger,
+    msg: &NotifyMsg,
+    incident_id: Option<i64>,
+) -> anyhow::Result<()> {
+    let sent_at = now();
     let cooldown_minutes = settings_store::cooldown_minutes(&state.db).await;
+    let trigger_str = trigger.as_str();
 
+    // Deliberately no `AND nc.type = 'email'` here — every active channel
+    // type attached to this monitor is a candidate; routing by type happens
+    // per-channel below.
     let channels: Vec<AttachedChannel> = sqlx::query_as(
-        "SELECT nc.id AS channel_id, nc.config AS config, mn.triggers AS triggers
+        "SELECT nc.id AS channel_id, nc.type AS channel_type, nc.config AS config, mn.triggers AS triggers
          FROM monitor_notifications mn
          JOIN notification_channels nc ON nc.id = mn.channel_id
-         WHERE mn.monitor_id = ? AND nc.is_active = 1 AND nc.type = 'email'",
+         WHERE mn.monitor_id = ? AND nc.is_active = 1",
     )
     .bind(m.id)
     .fetch_all(&state.db)
     .await?;
-
-    let trigger_str = trigger.as_str();
 
     for ch in channels {
         let triggers: Vec<String> = serde_json::from_str(&ch.triggers).unwrap_or_default();
@@ -76,64 +168,71 @@ pub async fn on_transition(
             continue;
         }
 
+        // Per-(monitor, channel, trigger) cooldown — NOT per-(monitor,
+        // trigger). The old key throttled every channel attached to a
+        // monitor+trigger to a single combined send budget, so a 2nd
+        // channel could be silently starved by a 1st channel's send.
         let last_sent: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(sent_at) FROM notification_log WHERE monitor_id = ? AND trigger = ?",
+            "SELECT MAX(sent_at) FROM notification_log
+             WHERE monitor_id = ? AND channel_id = ? AND trigger = ?",
         )
         .bind(m.id)
+        .bind(ch.channel_id)
         .bind(trigger_str)
         .fetch_one(&state.db)
         .await?;
 
-        if !cooldown::allowed(last_sent, now, cooldown_minutes) {
+        if !cooldown::allowed(last_sent, sent_at, cooldown_minutes) {
             continue; // suppressed by cooldown
         }
 
-        let cfg: EmailChannelConfig = match serde_json::from_str(&ch.config) {
-            Ok(c) => c,
-            Err(e) => {
-                log_result(state, m.id, ch.channel_id, incident_id, trigger_str, now, false, Some(&e.to_string()))
-                    .await?;
-                continue;
-            }
-        };
-
-        let smtp_cfg = SmtpConfig {
-            host: cfg.host,
-            port: cfg.port,
-            security: cfg.security,
-        };
-
-        let ctx = TemplateCtx {
-            monitor_name: m.name.clone(),
-            url: m.url.clone().unwrap_or_default(),
-            status: trigger_status(trigger).to_string(),
-            status_code: None,
-            error: None,
-            response_time_ms: None,
-            duration: None,
-            checked_at: now,
-        };
-        let (subject, body_text, body_html) = templates::render(trigger, &ctx);
-
-        let msg = EmailMsg {
-            to: cfg.to,
-            from: cfg.from,
-            subject,
-            body_text,
-            body_html,
-        };
-
-        let result = state.transport.send(&smtp_cfg, &msg).await;
+        let result = send_to_channel(state, &ch, msg).await;
         let (success, error) = match &result {
             Ok(()) => (true, None),
             Err(e) => (false, Some(e.to_string())),
         };
 
-        log_result(state, m.id, ch.channel_id, incident_id, trigger_str, now, success, error.as_deref())
-            .await?;
+        log_result(
+            state,
+            m.id,
+            ch.channel_id,
+            incident_id,
+            trigger_str,
+            sent_at,
+            success,
+            error.as_deref(),
+        )
+        .await?;
     }
 
     Ok(())
+}
+
+async fn send_to_channel(
+    state: &AppState,
+    ch: &AttachedChannel,
+    msg: &NotifyMsg,
+) -> anyhow::Result<()> {
+    if ch.channel_type == "email" {
+        let cfg: EmailChannelConfig = serde_json::from_str(&ch.config)?;
+        let smtp_cfg = SmtpConfig {
+            host: cfg.host,
+            port: cfg.port,
+            security: cfg.security,
+            username: cfg.username,
+        };
+        let email_msg = EmailMsg {
+            to: cfg.to,
+            from: cfg.from,
+            subject: msg.subject.clone(),
+            body_text: msg.body.clone(),
+            body_html: msg.body_html.clone(),
+        };
+        state.transport.send(&smtp_cfg, &email_msg).await
+    } else {
+        let config: serde_json::Value = serde_json::from_str(&ch.config)?;
+        state.http_sender.send(&ch.channel_type, &config, msg).await
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

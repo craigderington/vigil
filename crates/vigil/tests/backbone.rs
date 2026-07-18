@@ -4,7 +4,7 @@ use common::*;
 #[tokio::test]
 async fn recording_transport_captures_send() {
     let env = test_state().await;
-    let cfg = vigil::notify::SmtpConfig { host: "h".into(), port: 25, security: "none".into() };
+    let cfg = vigil::notify::SmtpConfig { host: "h".into(), port: 25, security: "none".into(), username: None };
     let msg = vigil::notify::EmailMsg {
         to: vec!["a@b".into()],
         from: "f@b".into(),
