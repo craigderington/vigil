@@ -72,6 +72,17 @@ async fn serve(state: vigil::app::AppState) -> std::net::SocketAddr {
     let list: serde_json::Value = c.get(format!("http://{a}/api/channels")).send().await.unwrap().json().await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
+#[tokio::test] async fn monitor_notifications_roundtrip() {
+    let env = test_state().await; let a = serve(env.state.clone()).await; let c = reqwest::Client::new();
+    // create a channel and a monitor
+    let ch: serde_json::Value = c.post(format!("http://{a}/api/channels")).json(&serde_json::json!({"name":"m","type":"email","config":"{}"})).send().await.unwrap().json().await.unwrap();
+    let mon: serde_json::Value = c.post(format!("http://{a}/api/monitors")).json(&serde_json::json!({"name":"x","url":"https://e.com"})).send().await.unwrap().json().await.unwrap();
+    let (cid, mid) = (ch["id"].as_i64().unwrap(), mon["id"].as_i64().unwrap());
+    c.put(format!("http://{a}/api/monitors/{mid}/notifications")).json(&serde_json::json!([{"channel_id":cid,"triggers":["down","recovered"]}])).send().await.unwrap();
+    let got: serde_json::Value = c.get(format!("http://{a}/api/monitors/{mid}/notifications")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(got.as_array().unwrap().len(), 1);
+    assert_eq!(got[0]["channel_id"].as_i64(), Some(cid));
+}
 #[tokio::test] async fn settings_get_and_put() {
     let env = test_state().await; let a = serve(env.state.clone()).await; let c = reqwest::Client::new();
     let s: serde_json::Value = c.get(format!("http://{a}/api/settings")).send().await.unwrap().json().await.unwrap();

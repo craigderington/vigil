@@ -212,6 +212,73 @@ pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome>
     Json(out)
 }
 
+/// A single monitor→channel attachment as exchanged with the frontend: the
+/// channel id plus the list of triggers (`down`, `recovered`, ...) that
+/// should fire notifications on that channel for this monitor.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+pub struct MonitorNotification {
+    pub channel_id: i64,
+    pub triggers: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct MonitorNotificationRow {
+    channel_id: i64,
+    triggers: String,
+}
+
+pub async fn list_notifications(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Vec<MonitorNotification>> {
+    let rows: Vec<MonitorNotificationRow> = sqlx::query_as(
+        "SELECT channel_id, triggers FROM monitor_notifications WHERE monitor_id = ?",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(db_err)?;
+
+    let out = rows
+        .into_iter()
+        .map(|r| MonitorNotification {
+            channel_id: r.channel_id,
+            triggers: serde_json::from_str(&r.triggers).unwrap_or_default(),
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+pub async fn set_notifications(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(items): Json<Vec<MonitorNotification>>,
+) -> ApiResult<Value> {
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+
+    sqlx::query("DELETE FROM monitor_notifications WHERE monitor_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+    for item in &items {
+        let triggers_json = serde_json::to_string(&item.triggers).unwrap_or_else(|_| "[]".to_string());
+        sqlx::query(
+            "INSERT INTO monitor_notifications (monitor_id, channel_id, triggers) VALUES (?, ?, ?)",
+        )
+        .bind(id)
+        .bind(item.channel_id)
+        .bind(triggers_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+    }
+
+    tx.commit().await.map_err(db_err)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 #[derive(Deserialize)]
 pub struct StatsQuery {
     range: Option<String>,

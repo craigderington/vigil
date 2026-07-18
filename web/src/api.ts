@@ -48,6 +48,38 @@ export function testCheck(dto: any): Promise<any> {
   }).then((r) => json(r));
 }
 
+export function updateMonitor(id: number, dto: any): Promise<any> {
+  return fetch(`/api/monitors/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(dto),
+  }).then((r) => json(r));
+}
+
+export function getChannels(): Promise<any[]> {
+  return fetch("/api/channels").then((r) => json(r));
+}
+
+export interface MonitorNotification {
+  channel_id: number;
+  triggers: string[];
+}
+
+export function getMonitorNotifications(id: number): Promise<MonitorNotification[]> {
+  return fetch(`/api/monitors/${id}/notifications`).then((r) => json(r));
+}
+
+export function setMonitorNotifications(
+  id: number,
+  list: MonitorNotification[],
+): Promise<{ ok: boolean }> {
+  return fetch(`/api/monitors/${id}/notifications`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(list),
+  }).then((r) => json(r));
+}
+
 export type StatsRange = "24h" | "7d";
 
 export interface Stats {

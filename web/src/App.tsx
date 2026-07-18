@@ -1,10 +1,12 @@
 import { createMemo, createSignal, Show, type Component } from "solid-js";
 import { createMonitorStore } from "./store";
+import * as api from "./api";
 import Rail from "./components/Rail";
 import TopBar from "./components/TopBar";
 import ConnectivityBanner from "./components/ConnectivityBanner";
 import MonitorGrid from "./components/MonitorGrid";
 import DetailPanel from "./components/DetailPanel";
+import MonitorForm from "./components/MonitorForm";
 
 const App: Component = () => {
   const store = createMonitorStore();
@@ -28,7 +30,26 @@ const App: Component = () => {
   // in the panel without a separate fetch or a stale snapshot.
   const openMonitor = createMemo(() => store.monitorById(openMonitorId()));
 
-  const addMonitor = () => {};
+  // Add/Edit monitor form. `formMonitor() === undefined` means ADD mode;
+  // any other value (including a monitor object) means EDIT mode for that
+  // monitor. `formOpen` is a separate signal so "Add" (no monitor) is
+  // distinguishable from "form closed".
+  const [formOpen, setFormOpen] = createSignal(false);
+  const [formMonitor, setFormMonitor] = createSignal<any | undefined>(undefined);
+
+  const addMonitor = () => {
+    setFormMonitor(undefined);
+    setFormOpen(true);
+  };
+  const editMonitor = (monitor: any) => {
+    setFormMonitor(monitor);
+    setFormOpen(true);
+  };
+  const closeForm = () => setFormOpen(false);
+  const onFormSaved = () => {
+    store.refresh();
+    setFormOpen(false);
+  };
 
   return (
     <div class="app">
@@ -51,7 +72,11 @@ const App: Component = () => {
           monitor={openMonitor()}
           onClose={() => setOpenMonitorId(null)}
           onChanged={store.refresh}
+          onEdit={editMonitor}
         />
+      </Show>
+      <Show when={formOpen()}>
+        <MonitorForm api={api} monitor={formMonitor()} onSaved={onFormSaved} onClose={closeForm} />
       </Show>
     </div>
   );
