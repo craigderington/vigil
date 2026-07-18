@@ -140,30 +140,69 @@ pub async fn probe(m: &Monitor) -> ProbeOutcome {
                 cause: Some(cause),
             }
         }
-        Ok(resp) => {
+        Ok(mut resp) => {
             let code = resp.status().as_u16();
             let expected_ok = status_codes::parse_expected(&m.expected_status_codes)
                 .map(|ranges| status_codes::matches(&ranges, code))
                 .unwrap_or(false);
 
-            if expected_ok {
-                ProbeOutcome {
-                    ok: true,
-                    response_time_ms: Some(elapsed),
-                    status_code: Some(code as i64),
-                    error_message: None,
-                    resolved_ip: None,
-                    cause: None,
-                }
-            } else {
-                ProbeOutcome {
+            if !expected_ok {
+                return ProbeOutcome {
                     ok: false,
                     response_time_ms: Some(elapsed),
                     status_code: Some(code as i64),
                     error_message: Some(format!("unexpected status {code}")),
                     resolved_ip: None,
                     cause: Some(Cause::Status),
+                };
+            }
+
+            if m.r#type == "keyword" {
+                if let Some(keyword) = m.keyword.as_deref() {
+                    // Bounded chunk loop — never buffer the whole body
+                    // (`resp.bytes()` would), cap at 2 MiB.
+                    let mut buf = Vec::new();
+                    while let Some(chunk) = resp.chunk().await.ok().flatten() {
+                        buf.extend_from_slice(&chunk);
+                        if buf.len() >= 2 * 1024 * 1024 {
+                            buf.truncate(2 * 1024 * 1024);
+                            break;
+                        }
+                    }
+                    let body = String::from_utf8_lossy(&buf);
+
+                    let (haystack, needle) = if m.keyword_case_sensitive {
+                        (body.to_string(), keyword.to_string())
+                    } else {
+                        (body.to_lowercase(), keyword.to_lowercase())
+                    };
+                    let contains = haystack.contains(&needle);
+                    let mode = m.keyword_mode.as_deref().unwrap_or("present");
+                    let keyword_ok = match mode {
+                        "absent" => !contains,
+                        _ => contains,
+                    };
+
+                    if !keyword_ok {
+                        return ProbeOutcome {
+                            ok: false,
+                            response_time_ms: Some(elapsed),
+                            status_code: Some(code as i64),
+                            error_message: Some(format!("keyword {mode} check failed")),
+                            resolved_ip: None,
+                            cause: Some(Cause::Keyword),
+                        };
+                    }
                 }
+            }
+
+            ProbeOutcome {
+                ok: true,
+                response_time_ms: Some(elapsed),
+                status_code: Some(code as i64),
+                error_message: None,
+                resolved_ip: None,
+                cause: None,
             }
         }
     }
