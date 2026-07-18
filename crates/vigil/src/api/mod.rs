@@ -3,6 +3,7 @@
 //! `app::router` rather than here (they aren't `/api/*` routes).
 
 pub mod channels;
+pub mod incidents;
 pub mod monitors;
 pub mod settings;
 pub mod sse;
@@ -46,6 +47,8 @@ pub fn routes() -> Router<AppState> {
             "/monitors/:id/notifications",
             get(monitors::list_notifications).put(monitors::set_notifications),
         )
+        .route("/incidents", get(incidents::list))
+        .route("/incidents/:id/acknowledge", post(incidents::acknowledge))
         .route("/channels", get(channels::list).post(channels::create))
         .route(
             "/channels/:id",
