@@ -74,7 +74,9 @@ pub fn validate_monitor_dto(ty: &str, url: &Option<String>, host: &Option<String
 - incidents: `[{ "id", "monitor_id", "monitor_name", "started_at", "resolved_at": Option, "duration_seconds": Option, "cause": Option, "status_code": Option, "error_message": Option, "acknowledged": bool }]`
 - stats (extended): `{ "uptime_pct": Option<f64>, "downtime_seconds": i64, "avg_ms": Option<f64>, "incidents": i64 }`
 
-**UTC day helpers** (`rollup.rs`): `day_str(epoch)->"YYYY-MM-DD"`, `day_bounds(day)->(start_epoch, end_epoch)`. Use `chrono` if already a dep, else compute via integer math (`epoch/86400*86400`) — **prefer integer math to avoid a new chrono dep** unless chrono is already present.
+**UTC day helpers** (`rollup.rs`): `day_str(epoch)->"YYYY-MM-DD"`, `day_bounds(day)->(start_epoch, end_epoch)`. **Add `chrono = { version="0.4", default-features=false, features=["std"] }`** (no openssl; a `YYYY-MM-DD` string→epoch needs civil-date math — flooring an epoch does NOT work). `day_bounds`: `NaiveDate::parse_from_str(day, "%Y-%m-%d")?.and_hms_opt(0,0,0)?.and_utc().timestamp()` for start, `start + 86400` for end. `day_str`: `DateTime::<Utc>::from_timestamp(epoch,0)?.format("%Y-%m-%d")`.
+
+**`ensure_aggregates(pool, monitor_id, retention_days)`** — retention-bounded: internally finds the monitor's last stored aggregate day and rolls up completed days from there through yesterday, bounded by `retention_days`. (Single canonical signature; no `since_day` param.)
 
 ---
 
@@ -137,7 +139,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
 // split_statements: for each line, drop from an unquoted `--` to EOL, join with \n, split on ';'.
 ```
 (A simple `--`-strip that ignores `--` inside string literals is acceptable for our migrations, which have no `--` inside strings; note that in a comment.)
-- [ ] **Step 5: Implement models/DTO** — add the 7 `Monitor` fields + `FromRow` reads (`keyword_case_sensitive` i64→bool), add `Incident.acknowledged` (add an `Incident` struct + manual `FromRow` if none exists; read `acknowledged` i64→bool), extend `test_defaults_monitor()` (new fields None/false, `r#type` stays "http"). `CreateMonitorDto`: add `#[serde(default="d_http")] pub r#type: String`, change `url` to `Option<String>`, add the 7 optional fields (`d_http()->"http".into()`, `keyword_case_sensitive` default false). `UpdateMonitorDto`: same as Option. Update `api/monitors.rs` `create()` to INSERT `type` from the dto (not hardcoded 'http') + the new columns, and `url` as Option. (Per-type validation lands in Task 2 — for now keep create working for http with the dto's type.)
+- [ ] **Step 5: Implement models/DTO** — add the 7 `Monitor` fields + `FromRow` reads (`keyword_case_sensitive` i64→bool), add `Incident.acknowledged` (add an `Incident` struct + manual `FromRow` if none exists; read `acknowledged` i64→bool), extend `test_defaults_monitor()` (new fields None/false, `r#type` stays "http"). `CreateMonitorDto`: add `#[serde(default="d_http")] pub r#type: String`, change `url` to `Option<String>`, add the 7 optional fields (`d_http()->"http".into()`, `keyword_case_sensitive` default false). `UpdateMonitorDto`: same as Option. Update `api/monitors.rs` `create()` to INSERT `type` from the dto (not hardcoded 'http') + the 7 new columns, and `url` as Option. Extend `update()`'s UPDATE SQL to SET the 7 new columns (coalescing dto-over-existing like the other fields); **`type` is NOT mutable on edit** (set once at create — the form disables the type selector in edit mode). **Also fix `test_check` to compile: change `m.url = Some(dto.url)` to `m.url = dto.url;`** (dto.url is now `Option`). (Per-type validation + full test_check type-copy land in Task 2 — for now keep create working with the dto's type.)
 - [ ] **Step 6: Run → PASS** (migrate2 + full `cargo test -p vigil`) + `cargo clippy --all-targets -- -D warnings`. Note: existing tests that constructed a Monitor literal may need the new fields — update them (or rely on `test_defaults_monitor`).
 - [ ] **Step 7: Commit** `git commit -am "feat: version-ordered migration runner + 0002 (types, acknowledged, aggregates); model/DTO fields"`
 
@@ -145,7 +147,7 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
 
 ## Task 2: `probe::run` dispatcher + `Cause::Keyword` + per-type validation
 
-**Files:** Modify `crates/vigil/src/models.rs` (Cause), `crates/vigil/src/probe/mod.rs` (run), `crates/vigil/src/worker.rs` (call run), `crates/vigil/src/api/monitors.rs` (validate). Create a validation helper. Test: `tests/validate.rs`, inline.
+**Files:** Modify `crates/vigil/src/models.rs` (Cause), `crates/vigil/src/probe/mod.rs` (run), `crates/vigil/src/worker.rs` (call run), `crates/vigil/src/api/monitors.rs` (validate + test_check), `crates/vigil/src/engine.rs` (Cause match arm). Create a validation helper. Test: `tests/validate.rs`, inline.
 
 **Interfaces:** `probe::run(&Monitor)->ProbeOutcome`; `validate_monitor_dto(...)`.
 
@@ -162,7 +164,11 @@ pub async fn run(m: &Monitor) -> ProbeOutcome {
     }
 }
 ```
-(`tcp`/`dns` modules are stubbed in later tasks — for THIS task, add `pub mod tcp; pub mod dns;` with a minimal `pub async fn probe(_m:&Monitor)->ProbeOutcome { ProbeOutcome{ok:false,response_time_ms:None,status_code:None,error_message:Some("not yet implemented".into()),resolved_ip:None,cause:Some(Cause::Connection)} }` placeholder so it compiles; Tasks 3-4 fill them.) `worker::run_check` calls `probe::run(&m)` instead of `probe::http::probe(&m)`. Add `validate_monitor_dto` (per spec §5) and call it in `create` + `update` (return 422 with the message). 
+(`tcp`/`dns` modules are stubbed in later tasks — for THIS task, add `pub mod tcp; pub mod dns;` with a minimal `pub async fn probe(_m:&Monitor)->ProbeOutcome { ProbeOutcome{ok:false,response_time_ms:None,status_code:None,error_message:Some("not yet implemented".into()),resolved_ip:None,cause:Some(Cause::Connection)} }` placeholder so it compiles; Tasks 3-4 fill them.) `worker::run_check` calls `probe::run(&m)` instead of `probe::http::probe(&m)`. Add `validate_monitor_dto` (per spec §5) and call it in `create` + `update` (return 422 with the message).
+
+**Two required compile fixes when adding `Cause::Keyword`:**
+1. `crates/vigil/src/engine.rs` has an EXHAUSTIVE `match out.cause { Some(Cause::Timeout)=>"timeout", Some(Cause::Status)=>"status", Some(Cause::Connection)=>"connection", Some(Cause::Dns)=>"dns", None=>"connection" }` (~line 92) — adding the variant makes it non-exhaustive (E0004). Add an explicit arm `Some(Cause::Keyword) => "keyword",` (NOT a `_` wildcard — that would mislabel keyword incidents). `incidents.cause` has no CHECK, so "keyword" inserts fine.
+2. Make **`test_check` work per type**: after building the fixture `Monitor` from the dto, also set `m.r#type = dto.r#type` and copy `host/port/keyword/keyword_mode/keyword_case_sensitive/dns_record_type/dns_expected_value` from the dto, and call `probe::run(&m).await` (not `probe::http::probe(&m)`). Add a test asserting a `type:"port"` test-check against a bound port returns `ok:true` (exercises the dispatcher through the API).
 - [ ] **Step 4: Run → PASS** + clippy. **Step 5: Commit** `git commit -am "feat: probe::run dispatcher, Cause::Keyword, per-type monitor validation"`
 
 ---
@@ -231,7 +237,7 @@ fn m_port(host:&str, port:i64)->Monitor { let mut m=vigil::models::test_defaults
 
 - [ ] **Step 1: Failing tests** — wiremock serving a body "hello WORLD":
   - present + found → ok; present + missing keyword → `!ok, cause=Keyword`; absent + present keyword → `!ok, cause=Keyword`; absent + missing → ok; case-insensitive default matches "world"; case-sensitive requires exact.
-- [ ] **Step 2: Run → FAIL.** **Step 3: Implement** in `http::probe`: after computing the status-code success, if `m.r#type=="keyword"` and `m.keyword` is Some and status was ok: read the body with a 2 MiB cap (`resp.bytes()` then truncate, or a bounded read), `String::from_utf8_lossy`, apply case folding per flag, check `keyword_mode`; on mismatch set `ok=false, cause=Some(Cause::Keyword), error_message=Some("keyword <present|absent> check failed")`. Keep a shared `http::probe` used by both `http` and `keyword` types. **Step 4: Run → PASS** + clippy. **Step 5: Commit** `git commit -am "feat: keyword monitoring (bounded body match)"`
+- [ ] **Step 2: Run → FAIL.** **Step 3: Implement** in `http::probe`: after computing the status-code success, if `m.r#type=="keyword"` and `m.keyword` is Some and status was ok: read the body with a **bounded chunk loop** (NOT `resp.bytes()`, which buffers the whole body → OOM risk): `let mut buf=Vec::new(); while let Some(ch)=resp.chunk().await? { buf.extend_from_slice(&ch); if buf.len() >= 2*1024*1024 { buf.truncate(2*1024*1024); break; } }`, then `String::from_utf8_lossy(&buf)`, apply case folding per flag, check `keyword_mode`; on mismatch set `ok=false, cause=Some(Cause::Keyword), error_message=Some("keyword <present|absent> check failed")`. Keep a shared `http::probe` used by both `http` and `keyword` types. **Step 4: Run → PASS** + clippy. **Step 5: Commit** `git commit -am "feat: keyword monitoring (bounded body match)"`
 
 ---
 
@@ -259,18 +265,18 @@ mod common; use common::*;
     let (up,down,samp): (i64,i64,i64) = sqlx::query_as("SELECT up_count,down_count,sample_count FROM check_aggregates_daily WHERE monitor_id=1 AND day='2000-01-01'").fetch_one(&pool).await.unwrap();
     assert_eq!((up,down,samp),(3,1,4));
     let down_secs: f64 = sqlx::query_scalar("SELECT (100.0 - uptime_pct)/100.0*86400 FROM check_aggregates_daily WHERE monitor_id=1 AND day='2000-01-01'").fetch_one(&pool).await.unwrap();
-    assert!((down_secs-200.0).abs() < 1.0, "overlap incident contributes 200s downtime, got {down_secs}");
+    assert!((down_secs-200.0).abs() < 10.0, "overlap incident contributes ~200s downtime (uptime_pct is 2-dp rounded, ~8.6s granularity), got {down_secs}");
 }
 ```
-- [ ] **Step 2: Run → FAIL.** **Step 3: Implement.** `day_bounds("YYYY-MM-DD")->(i64,i64)` via integer math (parse to a UTC midnight epoch; `end=start+86400`). Prefer NOT adding chrono: parse the y/m/d and compute days-since-epoch (a small civil-from-days routine) — or, simpler and dependency-free, accept the day as already an epoch-derived string and compute via a helper. If this civil-date math is error-prone, adding `chrono` (rustls-agnostic, no openssl) is acceptable — note the choice. `rollup_day`: for each monitor with a check in `[ds,de)`, compute up/down/sample counts, avg/min/max response, incident_count (started in-day), and uptime_pct via `uptime::compute` fed the overlap incident spans (`started_at < de AND (resolved_at IS NULL OR resolved_at > ds)`) clipped to `[ds,de]` with `now=de` (completed day). Upsert. `rollup_catch_up`: from each monitor's last aggregate day (or oldest retained check) through yesterday, bounded by retention, call `rollup_day`. `ensure_aggregates`: bounded catch-up for one monitor (completed days since its last aggregate, within retention). Wire `rollup_catch_up` into the nightly maintenance loop (before prune) and a one-shot at startup (`main::serve`). **Step 4: Run → PASS** + clippy. **Step 5: Commit** `git commit -am "feat: daily rollups (overlap uptime), catch-up, ensure_aggregates"`
+- [ ] **Step 2: Run → FAIL.** **Step 3: Implement.** Add the `chrono` dep (per Shared Types: `default-features=false, features=["std"]`, no openssl). `day_bounds("YYYY-MM-DD")->(i64,i64)`: `NaiveDate::parse_from_str(day,"%Y-%m-%d")?.and_hms_opt(0,0,0)?.and_utc().timestamp()` for start, `start+86400` for end; `day_str(epoch)`: `DateTime::<Utc>::from_timestamp(epoch,0)?.format("%Y-%m-%d").to_string()`. `rollup_day`: for each monitor with a check in `[ds,de)`, compute up/down/sample counts, avg/min/max response, incident_count (started in-day), and uptime_pct via `uptime::compute` fed the overlap incident spans (`started_at < de AND (resolved_at IS NULL OR resolved_at > ds)`) clipped to `[ds,de]` with `now=de` (completed day). Upsert. `rollup_catch_up`: from each monitor's last aggregate day (or oldest retained check) through yesterday, bounded by retention, call `rollup_day`. `ensure_aggregates`: bounded catch-up for one monitor (completed days since its last aggregate, within retention). Wire `rollup_catch_up` into the nightly maintenance loop (before prune) and a one-shot at startup (`main::serve`). **Step 4: Run → PASS** + clippy. **Step 5: Commit** `git commit -am "feat: daily rollups (overlap uptime), catch-up, ensure_aggregates"`
 
 ---
 
 ## Task 7: Stats 30d/90d + series + bars endpoints
 
-**Files:** Modify `crates/vigil/src/api/monitors.rs`. Test: `tests/api_signal.rs`.
+**Files:** Modify `crates/vigil/src/api/monitors.rs`, `crates/vigil/src/api/mod.rs` (register routes). Test: `tests/api_signal.rs`.
 
-**Interfaces:** stats accepts 30d/90d (count-weighted avg from aggregates); `GET /series`; `GET /bars`.
+**Interfaces:** stats accepts 30d/90d (count-weighted avg from aggregates); `GET /series`; `GET /bars`. **Register the new routes in `api::routes()` in `api/mod.rs`** (next to the existing stats route): `.route("/monitors/:id/series", get(monitors::series))` and `.route("/monitors/:id/bars", get(monitors::bars))` — without this both 404 and the tests fail.
 
 - [ ] **Step 1: Failing tests** — create a monitor, insert checks + an incident; assert: `/stats?range=30d` returns a numeric `avg_ms`; `/series?range=24h` returns an array of `{t,ms,status}` bucketed ≤300; `/bars?days=90` returns 90 (or ≤90) day rows with `has_data` true for days with a check/incident.
 - [ ] **Step 2: Run → FAIL.** **Step 3: Implement.** Extend the stats range parser (24h/7d/30d/90d). For 30d/90d avg: `ensure_aggregates`, then `SELECT SUM(avg_response_ms*sample_count)/SUM(sample_count) FROM check_aggregates_daily WHERE monitor_id=? AND day>=? AND avg_response_ms IS NOT NULL` (+ blend today's raw-check avg, count-weighted). uptime/downtime from incidents (extend the P1 window logic to 30d/90d). `series`: SELECT checks in the window, bucket into ≤300 equal time-slots, per slot emit avg(ms)+worst status; return JSON. `bars`: `ensure_aggregates`; for each of the last `days` UTC days compute `uptime_pct`/`down_seconds` from incidents (overlap, clip end=min(day_end, now)), `incidents`=started-that-day count, `has_data`= aggregate exists OR (within retention AND a check exists) OR an incident overlaps. Return the array oldest→newest. **Step 4: Run → PASS** + clippy. **Step 5: Commit** `git commit -am "feat: stats 30d/90d, series (bucketed), bars endpoints"`
@@ -279,7 +285,7 @@ mod common; use common::*;
 
 ## Task 8: Incidents list + acknowledge endpoints
 
-**Files:** Create `crates/vigil/src/api/incidents.rs`; Modify `src/api/mod.rs`, `src/lib.rs`. Test: `tests/api_incidents.rs`.
+**Files:** Create `crates/vigil/src/api/incidents.rs`; Modify `src/api/mod.rs` (add `pub mod incidents;` there — NOT lib.rs; it's an `/api` submodule — and register its routes in `routes()`). Test: `tests/api_incidents.rs`.
 
 **Interfaces:** `GET /api/incidents?monitor_id=&range=`; `POST /api/incidents/:id/acknowledge`.
 
@@ -305,7 +311,7 @@ mod common; use common::*;
 
 - [ ] **Step 1: Add `uplot` dep** (`npm i uplot`). Import its CSS.
 - [ ] **Step 2: Failing test** — render `ResponseChart` with stubbed getSeries returning `[]` (empty) and assert it mounts without throwing (renders an empty-state, no crash). (uPlot in jsdom may need a guard — render a placeholder when the container has no size / no data.)
-- [ ] **Step 3: Run → FAIL.** **Step 4: Implement.** `getSeries(id,range)`, `getIncidents(monitorId,range)` in api.ts. `ResponseChart`: a range selector (24h/7d); on data, mount uPlot in an effect (guard for jsdom/no-size: only init uPlot if `clientWidth>0` and data present, else render an empty-state div); plot ms over time; shade incident spans (from getIncidents, clipped to range, open→now) as background rects/bands. Respect reduced-motion. Place in the detail panel. **Step 5: Run → PASS** + build + tsc. **Step 6: Commit** `git commit -am "feat(web): response-time chart (uPlot) with incident shading"`
+- [ ] **Step 3: Run → FAIL.** **Step 4: Implement.** `getSeries(id,range)` and `getIncidents(range?, monitorId?)` in api.ts (omit the `monitor_id` query param when `monitorId` is undefined, so Task 12's global Incidents screen reuses it for all monitors). `ResponseChart`: a range selector (24h/7d); on data, mount uPlot in an effect (guard for jsdom/no-size: only init uPlot if `clientWidth>0` and data present, else render an empty-state div); plot ms over time; shade incident spans (from getIncidents, clipped to range, open→now) as background rects/bands. Respect reduced-motion. Place in the detail panel. **Step 5: Run → PASS** + build + tsc. **Step 6: Commit** `git commit -am "feat(web): response-time chart (uPlot) with incident shading"`
 
 ---
 
@@ -314,7 +320,7 @@ mod common; use common::*;
 **Files:** Create `web/src/components/IncidentTimeline.tsx`; Modify `DetailPanel.tsx`, `api.ts` (acknowledgeIncident). Test: `web/src/__tests__/timeline.test.tsx`.
 
 - [ ] **Step 1: Failing test** — render `IncidentTimeline` with stubbed getIncidents returning one ongoing (resolved_at:null) + one resolved incident; assert both render, the ongoing shows an Acknowledge button, clicking it calls `acknowledgeIncident`.
-- [ ] **Step 2: Run → FAIL.** **Step 3: Implement.** `acknowledgeIncident(id)` in api.ts. `IncidentTimeline` props `{ monitorId, dayFilter? }`: fetch `/api/incidents?monitor_id`, reverse-chron list — cause icon, started (relative), duration (live tick if ongoing), resolved, status/error, Acknowledge button (ongoing/!acknowledged). Add it to the detail panel. **Extend the panel's uptime tiles to 24h/7d/30d/90d** (add 30d + 90d tiles wired to getStats). **Step 4: Run → PASS** + build + tsc. **Step 5: Commit** `git commit -am "feat(web): incident timeline + acknowledge + 30d/90d tiles"`
+- [ ] **Step 2: Run → FAIL.** **Step 3: Implement.** `acknowledgeIncident(id)` in api.ts. `IncidentTimeline` props `{ monitorId, dayFilter? }`: fetch `/api/incidents?monitor_id`, reverse-chron list — cause icon, started (relative), duration (live tick if ongoing), resolved, status/error, Acknowledge button (ongoing/!acknowledged). Add it to the detail panel. **Extend the panel's uptime tiles to 24h/7d/30d/90d** (add 30d + 90d tiles wired to getStats). **First widen `StatsRange` in `web/src/api.ts`** from `"24h"|"7d"` to `"24h"|"7d"|"30d"|"90d"` (else `tsc` fails), and confirm the `Stats` type exposes `downtime_seconds` for the per-tile downtime line. **Step 4: Run → PASS** + build + tsc. **Step 5: Commit** `git commit -am "feat(web): incident timeline + acknowledge + 30d/90d tiles"`
 
 ---
 
@@ -350,7 +356,7 @@ mod common; use common::*;
 **Files:** Create `docs/superpowers/plans/P2-acceptance.md`. No product code unless a DoD item fails.
 
 - [ ] **Step 1** — Migration: point the binary at a **copy of a P1-populated DB** (or a fresh one) and confirm `0002` applies (`SELECT MAX(version) FROM schema_migrations` = 2), no data lost.
-- [ ] **Step 2** — Create one monitor of EACH type (http, keyword against a local body, port against a bound port, ping, dns for localhost) via the API; confirm each probes and reports a sane status.
+- [ ] **Step 2** — Create one monitor of EACH type (http, keyword against a local body, port against a bound port, ping against a bound port, dns) via the API; confirm each probes and reports a sane status. For the **dns** monitor use a reliably-resolvable public name (e.g. `one.one.one.one` A) rather than `localhost` (localhost resolution can be non-deterministic in the container); accept either up/down for dns as long as it doesn't error.
 - [ ] **Step 3** — Backdate some checks + an incident; run a rollup (or wait/trigger); confirm `/bars` shows graded days, `/series` returns points, `/stats?range=30d` returns avg_ms, `/api/incidents` lists it, acknowledge flips the flag.
 - [ ] **Step 4** — Docker rebuild + boot on host 8099 → **healthy**; the dashboard shows bars + list view toggle.
 - [ ] **Step 5: Commit** the acceptance checklist.
