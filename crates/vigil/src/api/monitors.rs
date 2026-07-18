@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use super::{db_err, now};
 use crate::app::{AppState, SchedCmd};
-use crate::models::{CreateMonitorDto, Monitor, ProbeOutcome, UpdateMonitorDto};
+use crate::models::{CreateMonitorDto, DomainInfo, Monitor, ProbeOutcome, SslCert, UpdateMonitorDto};
 use crate::{probe, uptime};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
@@ -755,4 +755,52 @@ pub async fn bars(
     }
 
     Ok(Json(out))
+}
+
+/// The SSL cert card's data (§11.6 #6). `None`/`null` means no cert check
+/// has ever run for this monitor yet (add-on just enabled, or the slow
+/// cadence hasn't ticked) — not an error.
+pub async fn get_ssl(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Option<SslCert>> {
+    let row: Option<SslCert> = sqlx::query_as("SELECT * FROM ssl_certs WHERE monitor_id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(row))
+}
+
+/// The domain-expiry card's data (§11.6 #7). `None`/`null` means no domain
+/// check has ever run for this monitor yet, same as `get_ssl`.
+pub async fn get_domain(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Option<DomainInfo>> {
+    let row: Option<DomainInfo> = sqlx::query_as("SELECT * FROM domain_info WHERE monitor_id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(db_err)?;
+    Ok(Json(row))
+}
+
+/// On-demand SSL refresh (the cert card's `Refresh` button). Runs the same
+/// `cert_scheduler::refresh_ssl` the 12h slow-cadence scheduler uses, then
+/// returns the freshly persisted row.
+///
+/// Known benign race (Task 7 review): this does read-old -> check -> write
+/// with no per-monitor lock, so a manual refresh racing the scheduler's own
+/// tick for the same monitor could double-fire one alert threshold. Single-
+/// operator app, worst case one duplicate notification — not worth a
+/// locking subsystem (YAGNI).
+pub async fn refresh_ssl(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Option<SslCert>> {
+    crate::cert_scheduler::refresh_ssl(&state, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    get_ssl(State(state), Path(id)).await
+}
+
+/// On-demand domain-expiry refresh (the domain card's `Refresh` button).
+/// Same shape and same known race as `refresh_ssl` above.
+pub async fn refresh_domain(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Option<DomainInfo>> {
+    crate::cert_scheduler::refresh_domain(&state, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    get_domain(State(state), Path(id)).await
 }
