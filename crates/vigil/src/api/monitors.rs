@@ -367,6 +367,25 @@ pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome>
     m.domain_check_enabled = dto.domain_check_enabled;
     m.domain_alert_days = dto.domain_alert_days;
 
+    // `ssl`-type monitors have no `AppState`/pool here (`test_check` is a
+    // stateless handler for an unsaved DTO), so this calls `ssl::check`
+    // directly rather than `certcheck::ssl::ssl_probe` — the live "Test
+    // check" button must never write an `ssl_certs` row for a monitor that
+    // hasn't been saved yet.
+    if m.r#type == "ssl" {
+        let host = m.host.clone().unwrap_or_default();
+        let port = m.port.unwrap_or(443) as u16;
+        let r = crate::certcheck::ssl::check(&host, port, m.timeout_seconds as u64).await;
+        return Json(ProbeOutcome {
+            ok: r.is_valid,
+            response_time_ms: None,
+            status_code: None,
+            error_message: r.error,
+            resolved_ip: None,
+            cause: if r.is_valid { None } else { Some(crate::models::Cause::Ssl) },
+        });
+    }
+
     let out = probe::run(&m).await;
     Json(out)
 }

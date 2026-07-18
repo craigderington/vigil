@@ -52,7 +52,11 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
         return;
     }
 
-    let out = probe::run(&m).await;
+    let out = if m.r#type == "ssl" {
+        crate::certcheck::ssl::ssl_probe(state, &m).await
+    } else {
+        probe::run(&m).await
+    };
     let now = now();
 
     let status = if out.ok { "up" } else { "down" };

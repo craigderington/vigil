@@ -23,6 +23,9 @@ use tokio_rustls::rustls::server::ParsedCertificate;
 use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use x509_parser::prelude::*;
 
+use crate::app::AppState;
+use crate::models::{Cause, Monitor, ProbeOutcome};
+
 /// Outcome of a single SSL/TLS certificate check against `host:port`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SslResult {
@@ -274,4 +277,84 @@ pub async fn check(host: &str, port: u16, timeout_secs: u64) -> SslResult {
         self_signed,
         error: None,
     }
+}
+
+/// Runs the SSL/TLS check for an `ssl`-type monitor and persists the cert
+/// data via [`persist_ssl`], then reports the outcome as a normal
+/// [`ProbeOutcome`] so `worker::run_check` drives the SAME up/down state
+/// machine as every other monitor type: a self-signed/expired/mismatched
+/// cert (`is_valid == false`) confirms DOWN (after `confirmation_threshold`)
+/// with `Cause::Ssl`, exactly like a timed-out HTTP probe confirms DOWN with
+/// `Cause::Timeout`.
+///
+/// Deliberately does **not** touch `monitors.last_checked_at` (that's
+/// `engine::apply_result`'s job, same as any other type) nor
+/// `ssl_certs.last_checked` (see [`persist_ssl`]'s doc comment for why that
+/// column is left alone here).
+pub async fn ssl_probe(state: &AppState, m: &Monitor) -> ProbeOutcome {
+    let host = m.host.clone().unwrap_or_default();
+    let port = m.port.unwrap_or(443) as u16;
+
+    let started = std::time::Instant::now();
+    let r = check(&host, port, m.timeout_seconds as u64).await;
+    let ms = started.elapsed().as_millis() as i64;
+
+    if let Err(e) = persist_ssl(&state.db, m.id, &r).await {
+        tracing::error!(monitor_id = m.id, error = %e, "failed to persist ssl_certs row");
+    }
+
+    ProbeOutcome {
+        ok: r.is_valid,
+        response_time_ms: Some(ms),
+        status_code: None,
+        error_message: r.error.clone(),
+        resolved_ip: None,
+        cause: if r.is_valid { None } else { Some(Cause::Ssl) },
+    }
+}
+
+/// Column-scoped, data-only upsert of a monitor's `ssl_certs` row: writes
+/// only the cert *facts* (issuer/subject/validity/days_remaining/is_valid/
+/// chain_ok/hostname_match/self_signed) plus `error`.
+///
+/// Deliberately never touches `last_checked`, `alerted_days`, or
+/// `invalid_alerted` — those three columns are `cert_scheduler`'s (Task 7)
+/// fire-once/cadence bookkeeping for the slow 12h expiry evaluation, not
+/// this fast per-interval probe's concern. Leaving `last_checked` untouched
+/// here is precisely what lets `cert_scheduler` keep seeing an `ssl`-type
+/// monitor as "due": if this data-only path also refreshed
+/// `last_checked`, the slow expiry job would never see a due monitor and
+/// `ssl_expiring`/`ssl_invalid` alerts would never fire for `ssl`-type
+/// monitors.
+pub async fn persist_ssl(pool: &sqlx::SqlitePool, monitor_id: i64, r: &SslResult) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO ssl_certs \
+         (monitor_id, issuer, subject, valid_from, valid_until, days_remaining, is_valid, chain_ok, hostname_match, self_signed, error) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(monitor_id) DO UPDATE SET \
+           issuer = excluded.issuer, \
+           subject = excluded.subject, \
+           valid_from = excluded.valid_from, \
+           valid_until = excluded.valid_until, \
+           days_remaining = excluded.days_remaining, \
+           is_valid = excluded.is_valid, \
+           chain_ok = excluded.chain_ok, \
+           hostname_match = excluded.hostname_match, \
+           self_signed = excluded.self_signed, \
+           error = excluded.error",
+    )
+    .bind(monitor_id)
+    .bind(&r.issuer)
+    .bind(&r.subject)
+    .bind(r.valid_from)
+    .bind(r.valid_until)
+    .bind(r.days_remaining)
+    .bind(r.is_valid as i64)
+    .bind(r.chain_ok as i64)
+    .bind(r.hostname_match as i64)
+    .bind(r.self_signed as i64)
+    .bind(&r.error)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
