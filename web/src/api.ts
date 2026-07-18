@@ -134,3 +134,15 @@ export interface Stats {
 export function getStats(id: number, range: StatsRange = "24h"): Promise<Stats> {
   return fetch(`/api/monitors/${id}/stats?range=${range}`).then((r) => json(r));
 }
+
+export interface Bar {
+  day: string;
+  uptime_pct: number;
+  incidents: number;
+  down_seconds: number;
+  has_data: boolean;
+}
+
+export function getBars(id: number, days: number): Promise<Bar[]> {
+  return fetch(`/api/monitors/${id}/bars?days=${days}`).then((r) => json(r));
+}

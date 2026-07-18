@@ -222,6 +222,29 @@ button{font-family:inherit;color:inherit}
 .detail-tile-value.status-unknown{color:var(--unknown)}
 .detail-tile-sub{font-size:12px;color:var(--text-tertiary)}
 
+.detail-section{margin-bottom:20px}
+.detail-section-h{font-size:13px;font-weight:600;color:var(--text-secondary);margin:0 0 10px}
+
+/* ---------- Uptime bar (§11.5) ---------- */
+.uptime-bar{width:100%}
+.uptime-bar-row{display:flex;align-items:center;gap:8px}
+.uptime-bar-track{flex:1;display:flex;align-items:stretch;gap:2px;min-width:0;height:20px}
+.uptime-bar.compact .uptime-bar-track{height:14px}
+.uptime-segment{flex:1;min-width:2px;border-radius:2px;background:var(--border-default)}
+.uptime-segment.tier-up{background:var(--up)}
+.uptime-segment.tier-degraded{background:var(--degraded)}
+.uptime-segment.tier-down{background:var(--down)}
+.uptime-segment.tier-nodata{background:var(--border-default)}
+.uptime-bar-empty{flex:1;height:100%;border-radius:2px;background:var(--border-default);opacity:.4}
+.uptime-bar-endlabel{flex:0 0 auto;font-size:11px;color:var(--text-tertiary);white-space:nowrap}
+.uptime-bar-legend{display:flex;align-items:center;gap:14px;margin-top:8px;font-size:11px;color:var(--text-tertiary)}
+.legend-item{display:flex;align-items:center;gap:5px}
+.legend-swatch{width:8px;height:8px;border-radius:2px;display:inline-block}
+.legend-swatch.tier-up{background:var(--up)}
+.legend-swatch.tier-degraded{background:var(--degraded)}
+.legend-swatch.tier-down{background:var(--down)}
+.legend-swatch.tier-nodata{background:var(--border-default)}
+
 .detail-config{border-top:1px solid var(--border-subtle);padding-top:14px}
 .detail-config summary{
   cursor:pointer;font-size:14px;font-weight:600;color:var(--text-primary);list-style:none;

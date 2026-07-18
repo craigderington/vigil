@@ -1,5 +1,6 @@
 import { createResource, createSignal, onCleanup, Show, type Component } from "solid-js";
 import * as api from "../api";
+import UptimeBar from "./UptimeBar";
 
 export interface MonitorCardProps {
   monitor: any;
@@ -132,6 +133,8 @@ const MonitorCard: Component<MonitorCardProps> = (props) => {
           </Show>
         </span>
       </div>
+
+      <UptimeBar monitorId={props.monitor.id} compact />
 
       <Show when={menuOpen()}>
         {/* eslint-disable-next-line */}
