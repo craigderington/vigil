@@ -14,7 +14,7 @@ use hickory_resolver::proto::rr::{RData, RecordType};
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn config_error(msg: &str) -> ProbeOutcome {
     ProbeOutcome {
@@ -31,6 +31,12 @@ fn config_error(msg: &str) -> ProbeOutcome {
 /// canonical string forms of the matching records. Injectable so tests can
 /// avoid the network entirely; `probe` below is the real-resolver wrapper.
 ///
+/// The `resolve` call is bounded by `m.timeout_seconds`, matching
+/// `probe::tcp` and `probe::http` — a hung resolver must not hang the check
+/// forever.
+///
+/// - Timeout elapses before `resolve` completes → failed outcome,
+///   `Cause::Timeout`, "dns resolve timed out".
 /// - `Err` from `resolve` (lookup/network failure, e.g. NXDOMAIN) → failed
 ///   outcome, `Cause::Dns`, message preserved.
 /// - `Ok(records)` empty → failed outcome, `Cause::Dns`, "no records".
@@ -54,8 +60,26 @@ where
     };
 
     let start = Instant::now();
-    let result = resolve(host, record_type.clone()).await;
+    let timed = tokio::time::timeout(
+        Duration::from_secs(m.timeout_seconds as u64),
+        resolve(host, record_type.clone()),
+    )
+    .await;
     let elapsed = start.elapsed().as_millis() as i64;
+
+    let result = match timed {
+        Err(_) => {
+            return ProbeOutcome {
+                ok: false,
+                response_time_ms: Some(elapsed),
+                status_code: None,
+                error_message: Some("dns resolve timed out".to_string()),
+                resolved_ip: None,
+                cause: Some(Cause::Timeout),
+            };
+        }
+        Ok(result) => result,
+    };
 
     let records = match result {
         Err(e) => {

@@ -112,6 +112,26 @@ async fn missing_record_type_is_config_error() {
     assert!(matches!(o.cause, Some(Cause::Dns)));
 }
 
+/// A resolver that hangs longer than `timeout_seconds` must be bounded by
+/// the outer timeout rather than left to run indefinitely — mirrors
+/// `probe::tcp`/`probe::http`'s timeout behavior.
+#[tokio::test]
+async fn dns_resolve_timeout_is_bounded() {
+    let mut m = vigil::models::test_defaults_monitor();
+    m.r#type = "dns".into();
+    m.host = Some("slow".into());
+    m.url = None;
+    m.dns_record_type = Some("A".into());
+    m.timeout_seconds = 1;
+    let o = vigil::probe::dns::probe_with(&m, |_h, _rt| async {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        Ok::<Vec<String>, String>(vec!["1.2.3.4".into()])
+    })
+    .await;
+    assert!(!o.ok, "must not succeed after timeout");
+    assert!(matches!(o.cause, Some(Cause::Timeout)));
+}
+
 /// End-to-end wiring: `probe()` (the real-resolver entry point used by
 /// `probe::run`) must compile and run against a live resolver. Network
 /// access may not be available in CI/sandbox, so this only asserts the
