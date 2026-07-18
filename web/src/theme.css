@@ -379,3 +379,30 @@ button{font-family:inherit;color:inherit}
 .settings-title{font-size:20px;font-weight:650;color:var(--text-primary);margin:0}
 .settings-section{border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:20px;background:var(--bg-surface)}
 .settings-note{font-size:12px;color:var(--text-tertiary);margin:-4px 0 4px}
+
+/* ---------- SSL card (§11.6 #6) ---------- */
+.ssl-card-body{display:flex;gap:16px;align-items:flex-start}
+.ssl-ring{
+  flex:0 0 auto;width:68px;height:68px;border-radius:50%;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  border:3px solid var(--border-default);background:var(--bg-surface-2);color:var(--text-primary);
+}
+.ssl-ring.tier-green{border-color:var(--up);color:var(--up)}
+.ssl-ring.tier-amber{border-color:var(--degraded);color:var(--degraded)}
+.ssl-ring.tier-red{border-color:var(--down);color:var(--down)}
+.ssl-ring-days{font-size:18px;font-weight:600;line-height:1.1}
+.ssl-ring-unit{font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.06em}
+.ssl-card-details{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0}
+.ssl-detail-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:13px}
+.ssl-detail-label{color:var(--text-tertiary);flex:0 0 auto}
+.ssl-detail-value{color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.ssl-pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.ssl-pill{font-size:11px;font-weight:600;padding:2px 8px;border-radius:var(--r-pill);background:var(--bg-surface-3);color:var(--text-secondary)}
+.ssl-pill.ok{color:var(--up);background:rgba(53,208,127,.12)}
+.ssl-pill.bad{color:var(--down);background:rgba(242,109,109,.12)}
+.ssl-error{color:var(--down);font-size:12px;margin-top:6px}
+.ssl-empty{
+  color:var(--text-tertiary);font-size:13px;background:var(--bg-surface-2);
+  border:1px solid var(--border-subtle);border-radius:var(--r-md);
+  padding:16px;text-align:center;
+}

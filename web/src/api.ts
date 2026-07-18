@@ -188,3 +188,33 @@ export function getIncidents(range?: string, monitorId?: number): Promise<Incide
 export function acknowledgeIncident(id: number): Promise<{ ok: boolean }> {
   return fetch(`/api/incidents/${id}/acknowledge`, { method: "POST" }).then((r) => json(r));
 }
+
+/** `ssl_certs` row (§6, §11.6 #6). `null` (the whole object) means the
+ *  monitor has no cert row yet — SSL check enabled but not yet run. The
+ *  tri-state bool fields (`Option<bool>` on the Rust side) are `null` until
+ *  a handshake has actually produced a verdict for that dimension. */
+export interface SslCert {
+  monitor_id: number;
+  issuer: string | null;
+  subject: string | null;
+  valid_from: number | null;
+  valid_until: number | null;
+  days_remaining: number | null;
+  is_valid: boolean | null;
+  chain_ok: boolean | null;
+  hostname_match: boolean | null;
+  self_signed: boolean | null;
+  error: string | null;
+  alerted_days: number | null;
+  invalid_alerted: boolean;
+  last_checked: number | null;
+}
+
+export function getSsl(id: number): Promise<SslCert | null> {
+  return fetch(`/api/monitors/${id}/ssl`).then((r) => json(r));
+}
+
+/** Forces an immediate SSL handshake/re-check outside the 12h slow cadence. */
+export function refreshSsl(id: number): Promise<SslCert | null> {
+  return fetch(`/api/monitors/${id}/refresh-ssl`, { method: "POST" }).then((r) => json(r));
+}

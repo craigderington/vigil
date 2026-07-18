@@ -69,6 +69,25 @@ function patchMonitor(monitors: any[], id: number, patch: Record<string, any>): 
 }
 
 /**
+ * Pure reducer for the SSL "cert version" map (§11.6 #6 live update): a
+ * `cert_updated` SSE frame (fired by the backend's 12h cert scheduler or a
+ * manual refresh) bumps that monitor's counter so `SslCard`'s
+ * `createResource` — keyed in part on `certVersion(id)` — refetches. Split
+ * out from `applyEvent` (which only knows about `StoreState`, not the
+ * separate cert-bump map) so it can be unit-tested the same way `applyEvent`
+ * is: as a plain function over plain data, no store/EventSource involved.
+ */
+export function applyCertBump(
+  bump: Record<number, number>,
+  ev: StoreEvent,
+): Record<number, number> {
+  if (ev.event !== "cert_updated") return bump;
+  const id = ev.data?.id;
+  if (id == null) return bump;
+  return { ...bump, [id]: (bump[id] ?? 0) + 1 };
+}
+
+/**
  * Solid store seeded from GET /api/monitors, then kept live via
  * `EventSource("/events")`. Every inbound frame is run through the same
  * pure `applyEvent` reducer used by the tests, so store behavior and test
@@ -83,6 +102,12 @@ export function createMonitorStore() {
   // time the component unmounts on switching back to grid.
   const [layout, setLayout] = createSignal<Layout>("grid");
   const [sort, setSort] = createSignal<ListSort>({ col: null, dir: "asc" });
+
+  // Bump counter per monitor id, incremented on each `cert_updated` SSE
+  // frame. `SslCard` reads it via `certVersion(id)` as part of its
+  // `createResource` source tuple so it refetches after a backend-side
+  // cert refresh, without the rest of the store needing to know about SSL.
+  const [certBump, setCertBump] = createSignal<Record<number, number>>({});
 
   async function refresh() {
     try {
@@ -105,6 +130,7 @@ export function createMonitorStore() {
       } catch {
         return;
       }
+      setCertBump((b) => applyCertBump(b, frame));
       const next = applyEvent(state, frame);
       setState("online", next.online);
       setState("monitors", reconcile(next.monitors, { key: "id" }));
@@ -130,5 +156,6 @@ export function createMonitorStore() {
     setLayout,
     sort,
     setSort,
+    certVersion: (id: number) => certBump()[id] ?? 0,
   };
 }

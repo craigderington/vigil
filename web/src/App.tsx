@@ -121,6 +121,7 @@ const App: Component = () => {
           onClose={() => setOpenMonitorId(null)}
           onChanged={store.refresh}
           onEdit={editMonitor}
+          certVersion={store.certVersion}
         />
       </Show>
       <Show when={formOpen()}>

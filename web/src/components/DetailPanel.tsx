@@ -3,6 +3,7 @@ import * as api from "../api";
 import type { StatsRange } from "../api";
 import IncidentTimeline from "./IncidentTimeline";
 import ResponseChart from "./ResponseChart";
+import SslCard from "./SslCard";
 import UptimeBar from "./UptimeBar";
 
 export interface DetailPanelProps {
@@ -10,6 +11,9 @@ export interface DetailPanelProps {
   onClose: () => void;
   onEdit?: (monitor: any) => void;
   onChanged?: () => void;
+  /** `store.certVersion` — threaded down to `SslCard` so it refetches on a
+   *  `cert_updated` SSE frame instead of only on mount. */
+  certVersion?: (id: number) => number;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -245,6 +249,10 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
             <h3 class="detail-section-h">90-day uptime</h3>
             <UptimeBar monitorId={props.monitor.id} days={90} />
           </section>
+
+          <Show when={props.monitor?.ssl_check_enabled || props.monitor?.type === "ssl"}>
+            <SslCard monitorId={props.monitor.id} certVersion={props.certVersion} />
+          </Show>
 
           <IncidentTimeline monitorId={props.monitor.id} />
 
