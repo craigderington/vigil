@@ -218,3 +218,31 @@ export function getSsl(id: number): Promise<SslCert | null> {
 export function refreshSsl(id: number): Promise<SslCert | null> {
   return fetch(`/api/monitors/${id}/refresh-ssl`, { method: "POST" }).then((r) => json(r));
 }
+
+/** `domain_info` row (§6, §11.6 #7). `null` (the whole object) means the
+ *  monitor has no domain check row yet — domain check enabled but not yet
+ *  run. `queryable` is a tri-state bool (`Option<bool>` on the Rust side):
+ *  `null` until a lookup has actually completed, `false` when the
+ *  registry/TLD redacts or rate-limits WHOIS/RDAP (a real, definitive
+ *  state — not an error), `true` once expiry data was resolved. */
+export interface DomainInfo {
+  monitor_id: number;
+  registrar: string | null;
+  expiry_date: number | null;
+  days_remaining: number | null;
+  name_servers: string | null;
+  status_codes: string | null;
+  queryable: boolean | null;
+  source: string | null;
+  alerted_days: number | null;
+  last_checked: number | null;
+}
+
+export function getDomain(id: number): Promise<DomainInfo | null> {
+  return fetch(`/api/monitors/${id}/domain`).then((r) => json(r));
+}
+
+/** Forces an immediate RDAP/WHOIS lookup outside the 24h slow cadence. */
+export function refreshDomain(id: number): Promise<DomainInfo | null> {
+  return fetch(`/api/monitors/${id}/refresh-domain`, { method: "POST" }).then((r) => json(r));
+}

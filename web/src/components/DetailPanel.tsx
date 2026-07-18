@@ -1,6 +1,7 @@
 import { createResource, createSignal, onCleanup, onMount, Show, type Component } from "solid-js";
 import * as api from "../api";
 import type { StatsRange } from "../api";
+import DomainCard from "./DomainCard";
 import IncidentTimeline from "./IncidentTimeline";
 import ResponseChart from "./ResponseChart";
 import SslCard from "./SslCard";
@@ -11,8 +12,9 @@ export interface DetailPanelProps {
   onClose: () => void;
   onEdit?: (monitor: any) => void;
   onChanged?: () => void;
-  /** `store.certVersion` — threaded down to `SslCard` so it refetches on a
-   *  `cert_updated` SSE frame instead of only on mount. */
+  /** `store.certVersion` — threaded down to `SslCard` and `DomainCard` so
+   *  they refetch on a `cert_updated` SSE frame instead of only on mount
+   *  (`refresh_domain` emits the same event as `refresh_ssl`). */
   certVersion?: (id: number) => number;
 }
 
@@ -252,6 +254,10 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
 
           <Show when={props.monitor?.ssl_check_enabled || props.monitor?.type === "ssl"}>
             <SslCard monitorId={props.monitor.id} certVersion={props.certVersion} />
+          </Show>
+
+          <Show when={props.monitor?.domain_check_enabled}>
+            <DomainCard monitorId={props.monitor.id} certVersion={props.certVersion} />
           </Show>
 
           <IncidentTimeline monitorId={props.monitor.id} />
