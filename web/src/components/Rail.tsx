@@ -1,15 +1,24 @@
 import { createMemo, type Component } from "solid-js";
 
+export type RailView = "dashboard" | "settings";
+
 export interface RailProps {
   monitors: any[];
+  /** Which top-level view is active; drives `aria-current`. Defaults to "dashboard". */
+  activeView?: RailView;
+  /** Fired with the clicked item's key. Items without a wired screen yet
+   * (Incidents/Notifications/Maintenance) still fire so a future screen can
+   * hook in; App.tsx currently routes anything but "settings" back to the
+   * dashboard grid. */
+  onNavigate?: (key: RailView | "incidents" | "notifications" | "maintenance") => void;
 }
 
-const NAV_ITEMS: { icon: string; label: string }[] = [
-  { icon: "▣", label: "Dashboard" },
-  { icon: "⚠", label: "Incidents" },
-  { icon: "\u{1F514}", label: "Notifications" },
-  { icon: "\u{1F6E0}", label: "Maintenance" },
-  { icon: "⚙", label: "Settings" },
+const NAV_ITEMS: { icon: string; label: string; key: RailView | "incidents" | "notifications" | "maintenance" }[] = [
+  { icon: "▣", label: "Dashboard", key: "dashboard" },
+  { icon: "⚠", label: "Incidents", key: "incidents" },
+  { icon: "\u{1F514}", label: "Notifications", key: "notifications" },
+  { icon: "\u{1F6E0}", label: "Maintenance", key: "maintenance" },
+  { icon: "⚙", label: "Settings", key: "settings" },
 ];
 
 const Rail: Component<RailProps> = (props) => {
@@ -32,13 +41,14 @@ const Rail: Component<RailProps> = (props) => {
           V
         </div>
         <div class="rail-nav">
-          {NAV_ITEMS.map((item, i) => (
+          {NAV_ITEMS.map((item) => (
             <button
               type="button"
               class="rail-item"
               aria-label={item.label}
               title={item.label}
-              aria-current={i === 0 ? "page" : undefined}
+              aria-current={(props.activeView ?? "dashboard") === item.key ? "page" : undefined}
+              onClick={() => props.onNavigate?.(item.key)}
             >
               {item.icon}
             </button>

@@ -1,17 +1,24 @@
 import { createMemo, createSignal, Show, type Component } from "solid-js";
 import { createMonitorStore } from "./store";
 import * as api from "./api";
-import Rail from "./components/Rail";
+import Rail, { type RailView } from "./components/Rail";
 import TopBar from "./components/TopBar";
 import ConnectivityBanner from "./components/ConnectivityBanner";
 import MonitorGrid from "./components/MonitorGrid";
 import DetailPanel from "./components/DetailPanel";
 import MonitorForm from "./components/MonitorForm";
+import Settings from "./components/Settings";
 
 const App: Component = () => {
   const store = createMonitorStore();
   const [query, setQuery] = createSignal("");
   const [statusFilter, setStatusFilter] = createSignal<string | null>(null);
+
+  // Top-level view. Only "dashboard" and "settings" have real screens right
+  // now; Rail still fires onNavigate for Incidents/Notifications/Maintenance
+  // so a future screen can hook in, but until then any of those clicks just
+  // return to the dashboard grid — see Rail.tsx.
+  const [view, setView] = createSignal<RailView>("dashboard");
 
   const filtered = createMemo(() => {
     const q = query().trim().toLowerCase();
@@ -54,19 +61,32 @@ const App: Component = () => {
 
   return (
     <div class="app">
-      <Rail monitors={store.monitors()} />
+      <Rail
+        monitors={store.monitors()}
+        activeView={view()}
+        onNavigate={(key) => setView(key === "settings" ? "settings" : "dashboard")}
+      />
       <div class="app-main">
-        <ConnectivityBanner online={store.online()} />
-        <TopBar
-          query={query()}
-          onQueryChange={setQuery}
-          statusFilter={statusFilter()}
-          onStatusFilterChange={setStatusFilter}
-          onAdd={addMonitor}
-        />
-        <div class="app-content">
-          <MonitorGrid monitors={filtered()} onOpen={setOpenMonitorId} onChanged={store.refresh} />
-        </div>
+        <Show
+          when={view() === "dashboard"}
+          fallback={
+            <div class="app-content">
+              <Settings />
+            </div>
+          }
+        >
+          <ConnectivityBanner online={store.online()} />
+          <TopBar
+            query={query()}
+            onQueryChange={setQuery}
+            statusFilter={statusFilter()}
+            onStatusFilterChange={setStatusFilter}
+            onAdd={addMonitor}
+          />
+          <div class="app-content">
+            <MonitorGrid monitors={filtered()} onOpen={setOpenMonitorId} onChanged={store.refresh} />
+          </div>
+        </Show>
       </div>
       <Show when={openMonitor()}>
         <DetailPanel

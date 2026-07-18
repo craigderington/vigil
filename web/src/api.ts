@@ -60,6 +60,48 @@ export function getChannels(): Promise<any[]> {
   return fetch("/api/channels").then((r) => json(r));
 }
 
+export function createChannel(dto: { name: string; type: string; config: any }): Promise<any> {
+  return fetch("/api/channels", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(dto),
+  }).then((r) => json(r));
+}
+
+export function updateChannel(
+  id: number,
+  dto: { name?: string; config?: any; is_active?: boolean },
+): Promise<any> {
+  return fetch(`/api/channels/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(dto),
+  }).then((r) => json(r));
+}
+
+export function testChannel(id: number): Promise<{ ok: boolean; error?: string | null }> {
+  return fetch(`/api/channels/${id}/test`, { method: "POST" }).then((r) => json(r));
+}
+
+export interface Settings {
+  anchors: string[];
+  cooldown_minutes: number;
+  retention_days: number;
+  accent: string;
+}
+
+export function getSettings(): Promise<Settings> {
+  return fetch("/api/settings").then((r) => json(r));
+}
+
+export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
+  return fetch("/api/settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  }).then((r) => json(r));
+}
+
 export interface MonitorNotification {
   channel_id: number;
   triggers: string[];
