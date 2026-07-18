@@ -1,6 +1,7 @@
 pub mod anchor;
 pub mod api;
 pub mod app;
+pub mod certcheck;
 pub mod config;
 pub mod cooldown;
 pub mod db;
