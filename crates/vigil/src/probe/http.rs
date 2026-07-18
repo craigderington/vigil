@@ -126,7 +126,7 @@ pub async fn probe(m: &Monitor) -> ProbeOutcome {
 
     let start = Instant::now();
     let result = req.send().await;
-    let elapsed = start.elapsed().as_millis() as i64;
+    let mut elapsed = start.elapsed().as_millis() as i64;
 
     match result {
         Err(e) => {
@@ -160,15 +160,41 @@ pub async fn probe(m: &Monitor) -> ProbeOutcome {
             if m.r#type == "keyword" {
                 if let Some(keyword) = m.keyword.as_deref() {
                     // Bounded chunk loop — never buffer the whole body
-                    // (`resp.bytes()` would), cap at 2 MiB.
+                    // (`resp.bytes()` would), cap at 2 MiB. Distinguish a
+                    // genuine end-of-stream (`Ok(None)`) from a transport
+                    // error mid-body (`Err`) — collapsing both to "stop
+                    // reading" would misreport a dropped connection as a
+                    // keyword mismatch on whatever partial bytes arrived.
                     let mut buf = Vec::new();
-                    while let Some(chunk) = resp.chunk().await.ok().flatten() {
-                        buf.extend_from_slice(&chunk);
-                        if buf.len() >= 2 * 1024 * 1024 {
-                            buf.truncate(2 * 1024 * 1024);
-                            break;
+                    loop {
+                        match resp.chunk().await {
+                            Ok(Some(chunk)) => {
+                                buf.extend_from_slice(&chunk);
+                                if buf.len() >= 2 * 1024 * 1024 {
+                                    buf.truncate(2 * 1024 * 1024);
+                                    break;
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                elapsed = start.elapsed().as_millis() as i64;
+                                let cause = if e.is_timeout() {
+                                    Cause::Timeout
+                                } else {
+                                    Cause::Connection
+                                };
+                                return ProbeOutcome {
+                                    ok: false,
+                                    response_time_ms: Some(elapsed),
+                                    status_code: Some(code as i64),
+                                    error_message: Some(e.to_string()),
+                                    resolved_ip: None,
+                                    cause: Some(cause),
+                                };
+                            }
                         }
                     }
+                    elapsed = start.elapsed().as_millis() as i64;
                     let body = String::from_utf8_lossy(&buf);
 
                     let (haystack, needle) = if m.keyword_case_sensitive {
