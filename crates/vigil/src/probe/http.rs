@@ -7,6 +7,17 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Default `User-Agent` for probe requests. Many sites (Cloudflare,
+/// ModSecurity, and other WAF/bot rules) return 4xx to requests that send no
+/// User-Agent, which would make Vigil report a false DOWN for a site that is
+/// actually up. This identifying, browser-compatible UA clears those rules
+/// while honestly naming the tool. A monitor may override it with its own
+/// `User-Agent` request header (reqwest merges client-default headers with
+/// `or_insert` semantics, so a per-request header wins — see the
+/// `custom_user_agent_overrides_default` test).
+pub const DEFAULT_USER_AGENT: &str =
+    "Mozilla/5.0 (compatible; Vigil/1.0; +https://github.com/craigderington/vigil)";
+
 /// Cached `reqwest::Client`s keyed on `(verify_ssl, follow_redirects)` —
 /// both are `ClientBuilder`-level settings, so we build one client per
 /// combination and reuse it (a fresh client per probe would defeat
@@ -25,6 +36,7 @@ fn client_for(verify_ssl: bool, follow_redirects: bool) -> reqwest::Client {
         return existing.clone();
     }
     let built = reqwest::Client::builder()
+        .user_agent(DEFAULT_USER_AGENT)
         .danger_accept_invalid_certs(!verify_ssl)
         .redirect(if follow_redirects {
             reqwest::redirect::Policy::limited(10)
