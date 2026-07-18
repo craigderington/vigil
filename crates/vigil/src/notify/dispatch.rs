@@ -57,6 +57,7 @@ fn trigger_status(trigger: Trigger) -> &'static str {
     match trigger {
         Trigger::Down => "down",
         Trigger::Recovered => "up",
+        Trigger::HeartbeatMissed => "down",
         Trigger::SslExpiring | Trigger::SslInvalid | Trigger::DomainExpiring => "alert",
     }
 }

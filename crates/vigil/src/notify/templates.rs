@@ -7,7 +7,7 @@
 //! path (`TemplateCtx`, used by `dispatch::on_transition`) and
 //! `render_alert` covers the SSL/domain add-on alerts (`AlertCtx`, used by
 //! `dispatch::send_alert`). `Trigger` is a single enum shared by both paths,
-//! so each render fn's match must stay exhaustive over all 5 variants even
+//! so each render fn's match must stay exhaustive over all 6 variants even
 //! though only 2 (or 3) are meaningful to it — the off-path arms return a
 //! generic fallback rather than `unreachable!()`, since a future caller
 //! could legitimately reach either fn with any trigger.
@@ -21,6 +21,7 @@ pub fn render(trigger: Trigger, ctx: &TemplateCtx) -> (String, String, Option<St
     let subject = match trigger {
         Trigger::Down => format!("🔴 {} is DOWN", ctx.monitor_name),
         Trigger::Recovered => format!("✅ {} recovered", ctx.monitor_name),
+        Trigger::HeartbeatMissed => format!("{} missed its heartbeat", ctx.monitor_name),
         Trigger::SslExpiring | Trigger::SslInvalid | Trigger::DomainExpiring => {
             format!("{} notification", ctx.monitor_name)
         }
@@ -61,7 +62,9 @@ pub fn render_alert(trigger: Trigger, ctx: &AlertCtx) -> (String, String, Option
         Trigger::SslExpiring => format!("⚠️ {} SSL certificate expiring soon", ctx.monitor_name),
         Trigger::SslInvalid => format!("🔴 {} SSL certificate invalid", ctx.monitor_name),
         Trigger::DomainExpiring => format!("⚠️ {} domain registration expiring soon", ctx.monitor_name),
-        Trigger::Down | Trigger::Recovered => format!("{} notification", ctx.monitor_name),
+        Trigger::Down | Trigger::Recovered | Trigger::HeartbeatMissed => {
+            format!("{} notification", ctx.monitor_name)
+        }
     };
 
     let mut lines = vec![

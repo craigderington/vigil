@@ -40,6 +40,7 @@ pub enum Cause {
     Dns,
     Keyword,
     Ssl,
+    Heartbeat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +51,7 @@ pub enum Trigger {
     SslExpiring,
     SslInvalid,
     DomainExpiring,
+    HeartbeatMissed,
 }
 impl Trigger {
     pub fn as_str(&self) -> &'static str {
@@ -59,6 +61,7 @@ impl Trigger {
             Trigger::SslExpiring => "ssl_expiring",
             Trigger::SslInvalid => "ssl_invalid",
             Trigger::DomainExpiring => "domain_expiring",
+            Trigger::HeartbeatMissed => "heartbeat_missed",
         }
     }
 }
@@ -103,6 +106,14 @@ pub struct Monitor {
     pub ssl_alert_days: String,
     pub domain_check_enabled: bool,
     pub domain_alert_days: String,
+    /// Never serialized — a security requirement (§9/§10): the push-ping
+    /// secret must never leak via any `Monitor` payload (list, get, SSE
+    /// snapshot, create/update response). The dedicated heartbeat endpoint
+    /// (Task 2) returns it explicitly instead.
+    #[serde(skip_serializing)]
+    pub heartbeat_token: Option<String>,
+    pub heartbeat_grace_seconds: i64,
+    pub last_ping_at: Option<Ts>,
     pub status: Status,
     pub is_paused: bool,
     pub last_checked_at: Option<Ts>,
@@ -154,6 +165,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Monitor {
             ssl_alert_days: row.try_get("ssl_alert_days")?,
             domain_check_enabled: domain_check_enabled_raw != 0,
             domain_alert_days: row.try_get("domain_alert_days")?,
+            heartbeat_token: row.try_get::<Option<String>, _>("heartbeat_token")?,
+            heartbeat_grace_seconds: row.try_get::<i64, _>("heartbeat_grace_seconds")?,
+            last_ping_at: row.try_get::<Option<i64>, _>("last_ping_at")?,
             status: Status::from_db(&status_raw),
             is_paused: is_paused_raw != 0,
             last_checked_at: row.try_get("last_checked_at")?,
@@ -318,6 +332,9 @@ fn d_ssl_alert_days() -> String {
 fn d_domain_alert_days() -> String {
     "[45,30,14,7]".to_string()
 }
+fn default_grace() -> i64 {
+    60
+}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateMonitorDto {
@@ -363,6 +380,8 @@ pub struct CreateMonitorDto {
     pub domain_check_enabled: bool,
     #[serde(default = "d_domain_alert_days")]
     pub domain_alert_days: String,
+    #[serde(default = "default_grace")]
+    pub heartbeat_grace_seconds: i64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -393,6 +412,7 @@ pub struct UpdateMonitorDto {
     pub ssl_alert_days: Option<String>,
     pub domain_check_enabled: Option<bool>,
     pub domain_alert_days: Option<String>,
+    pub heartbeat_grace_seconds: Option<i64>,
 }
 
 /// Fully-defaulted http Monitor fixture for tests in later tasks.
@@ -426,6 +446,9 @@ pub fn test_defaults_monitor() -> Monitor {
         ssl_alert_days: "[30,14,7,3,1]".to_string(),
         domain_check_enabled: false,
         domain_alert_days: "[45,30,14,7]".to_string(),
+        heartbeat_token: None,
+        heartbeat_grace_seconds: 60,
+        last_ping_at: None,
         status: Status::Pending,
         is_paused: false,
         last_checked_at: None,
