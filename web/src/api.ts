@@ -146,3 +146,40 @@ export interface Bar {
 export function getBars(id: number, days: number): Promise<Bar[]> {
   return fetch(`/api/monitors/${id}/bars?days=${days}`).then((r) => json(r));
 }
+
+export interface SeriesPoint {
+  t: number;
+  ms: number | null;
+  status: "up" | "down";
+}
+
+/** Bucketed response-time/status series for the detail panel's chart (§11.6 #4). */
+export function getSeries(id: number, range: StatsRange = "24h"): Promise<SeriesPoint[]> {
+  return fetch(`/api/monitors/${id}/series?range=${range}`).then((r) => json(r));
+}
+
+export interface Incident {
+  id: number;
+  monitor_id: number;
+  monitor_name: string;
+  started_at: number;
+  resolved_at: number | null;
+  duration_seconds: number | null;
+  cause: string | null;
+  status_code: number | null;
+  error_message: string | null;
+  acknowledged: boolean;
+}
+
+/**
+ * Global/per-monitor incident timeline. `monitor_id` is only included when
+ * `monitorId` is provided, so the global Incidents screen (Task 12) can
+ * reuse this for all monitors by omitting it.
+ */
+export function getIncidents(range?: string, monitorId?: number): Promise<Incident[]> {
+  const params = new URLSearchParams();
+  if (monitorId != null) params.set("monitor_id", String(monitorId));
+  if (range) params.set("range", range);
+  const qs = params.toString();
+  return fetch(`/api/incidents${qs ? `?${qs}` : ""}`).then((r) => json(r));
+}

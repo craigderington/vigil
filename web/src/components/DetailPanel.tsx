@@ -1,5 +1,6 @@
 import { createResource, createSignal, onCleanup, onMount, Show, type Component } from "solid-js";
 import * as api from "../api";
+import ResponseChart from "./ResponseChart";
 import UptimeBar from "./UptimeBar";
 
 export interface DetailPanelProps {
@@ -233,6 +234,8 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
             <UptimeTile label="24h" monitorId={props.monitor.id} range="24h" nullText="— · 24h" />
             <UptimeTile label="7d" monitorId={props.monitor.id} range="7d" nullText="— · 7d" />
           </div>
+
+          <ResponseChart monitorId={props.monitor.id} />
 
           <section class="detail-section">
             <h3 class="detail-section-h">90-day uptime</h3>

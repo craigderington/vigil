@@ -260,6 +260,21 @@ button{font-family:inherit;color:inherit}
   .detail-backdrop,.detail-panel{animation:none}
 }
 
+/* ---------- Response-time chart ---------- */
+.detail-section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.detail-section-head .detail-section-h{margin:0}
+.response-chart .range-toggle{display:flex;gap:6px}
+.response-chart-wrap{position:relative}
+.response-chart-canvas{width:100%}
+.response-chart-canvas .u-legend{display:none}
+.response-chart-bands{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.response-chart-band{position:absolute;top:0;bottom:0;background:rgba(242,109,109,.16);border-left:1px solid rgba(242,109,109,.4);border-right:1px solid rgba(242,109,109,.4)}
+.response-chart-empty{
+  display:flex;align-items:center;justify-content:center;height:120px;
+  color:var(--text-tertiary);font-size:13px;background:var(--bg-surface-2);
+  border:1px solid var(--border-subtle);border-radius:var(--r-md);
+}
+
 /* ---------- Monitor form ---------- */
 .form-body{display:flex;flex-direction:column;gap:24px}
 .form-section{border-top:1px solid var(--border-subtle);padding-top:16px;display:flex;flex-direction:column;gap:12px}
