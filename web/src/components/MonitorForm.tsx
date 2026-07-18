@@ -14,6 +14,16 @@ export interface MonitorFormProps {
   onClose: () => void;
 }
 
+const MONITOR_TYPES: { label: string; value: string }[] = [
+  { label: "HTTP", value: "http" },
+  { label: "Keyword", value: "keyword" },
+  { label: "Port", value: "port" },
+  { label: "Ping", value: "ping" },
+  { label: "DNS", value: "dns" },
+];
+
+const DNS_RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
+
 const INTERVAL_PRESETS: { label: string; seconds: number }[] = [
   { label: "30s", seconds: 30 },
   { label: "1m", seconds: 60 },
@@ -53,8 +63,22 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   const isEdit = () => props.monitor != null;
 
   const [name, setName] = createSignal(props.monitor?.name ?? "");
+  const [type, setType] = createSignal<string>(props.monitor?.type ?? "http");
   const [url, setUrl] = createSignal(props.monitor?.url ?? "");
   const [method, setMethod] = createSignal(props.monitor?.method ?? "GET");
+
+  // Type-specific fields (keyword / port / ping / dns) — §3 of the spec.
+  const [host, setHost] = createSignal(props.monitor?.host ?? "");
+  const [portValue, setPortValue] = createSignal<number | null>(props.monitor?.port ?? null);
+  const [keyword, setKeyword] = createSignal(props.monitor?.keyword ?? "");
+  const [keywordMode, setKeywordMode] = createSignal<string>(props.monitor?.keyword_mode ?? "present");
+  const [keywordCaseSensitive, setKeywordCaseSensitive] = createSignal<boolean>(
+    props.monitor?.keyword_case_sensitive ?? false,
+  );
+  const [dnsRecordType, setDnsRecordType] = createSignal<string>(props.monitor?.dns_record_type ?? "A");
+  const [dnsExpectedValue, setDnsExpectedValue] = createSignal(props.monitor?.dns_expected_value ?? "");
+
+  const isHttpLike = () => type() === "http" || type() === "keyword";
 
   const [intervalSeconds, setIntervalSeconds] = createSignal<number>(
     props.monitor?.interval_seconds ?? 300,
@@ -164,32 +188,59 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   }
 
   function buildDto() {
-    const rows = headerRows().filter((r) => r.key.trim() !== "");
-    const headers =
-      rows.length > 0 ? JSON.stringify(Object.fromEntries(rows.map((r) => [r.key, r.value]))) : null;
+    const t = type();
 
-    let authRef: string | null = null;
-    if (authType() !== "none" && authValue().trim() !== "") {
-      authRef = authValue().startsWith("env:") ? authValue() : `inline:${authValue()}`;
-    }
-
-    return {
+    // Fields common to every monitor type (name + schedule). Type-specific
+    // fields are layered on below so the DTO only carries what's relevant
+    // to `t` — the backend's per-type validation (§5) expects exactly that.
+    const dto: Record<string, unknown> = {
       name: name(),
-      url: url(),
-      method: method(),
-      headers,
-      body: bodyText().trim() === "" ? null : bodyText(),
-      auth_type: authType() === "none" ? null : authType(),
-      auth_ref: authRef,
-      expected_status_codes: expectedCodes(),
+      type: t,
       interval_seconds: Math.max(15, intervalSeconds()),
       timeout_seconds: Math.max(1, timeoutSeconds()),
-      follow_redirects: followRedirects(),
-      verify_ssl: verifySsl(),
       confirmation_threshold: Math.max(1, confirmationThreshold()),
       recovery_threshold: Math.max(1, recoveryThreshold()),
       retry_interval_seconds: Math.max(1, retryInterval()),
     };
+
+    if (isHttpLike()) {
+      const rows = headerRows().filter((r) => r.key.trim() !== "");
+      const headers =
+        rows.length > 0 ? JSON.stringify(Object.fromEntries(rows.map((r) => [r.key, r.value]))) : null;
+
+      let authRef: string | null = null;
+      if (authType() !== "none" && authValue().trim() !== "") {
+        authRef = authValue().startsWith("env:") ? authValue() : `inline:${authValue()}`;
+      }
+
+      dto.url = url();
+      dto.method = method();
+      dto.headers = headers;
+      dto.body = bodyText().trim() === "" ? null : bodyText();
+      dto.auth_type = authType() === "none" ? null : authType();
+      dto.auth_ref = authRef;
+      dto.expected_status_codes = expectedCodes();
+      dto.follow_redirects = followRedirects();
+      dto.verify_ssl = verifySsl();
+
+      if (t === "keyword") {
+        dto.keyword = keyword();
+        dto.keyword_mode = keywordMode();
+        dto.keyword_case_sensitive = keywordCaseSensitive();
+      }
+    } else if (t === "port") {
+      dto.host = host();
+      dto.port = portValue();
+    } else if (t === "ping") {
+      dto.host = host();
+      dto.port = portValue();
+    } else if (t === "dns") {
+      dto.host = host();
+      dto.dns_record_type = dnsRecordType();
+      dto.dns_expected_value = dnsExpectedValue().trim() === "" ? null : dnsExpectedValue();
+    }
+
+    return dto;
   }
 
   async function handleTestCheck() {
@@ -256,15 +307,135 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               />
             </div>
             <div class="form-field">
-              <label for="mf-url">URL</label>
-              <input
-                id="mf-url"
-                type="text"
-                placeholder="https://example.com/health"
-                value={url()}
-                onInput={(e) => setUrl(e.currentTarget.value)}
-              />
+              <label>Type</label>
+              <div class="chip-row" role="group" aria-label="Monitor type">
+                <For each={MONITOR_TYPES}>
+                  {(opt) => (
+                    <button
+                      type="button"
+                      class="chip"
+                      aria-pressed={type() === opt.value}
+                      disabled={isEdit()}
+                      onClick={() => setType(opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  )}
+                </For>
+              </div>
             </div>
+
+            <Show when={isHttpLike()}>
+              <div class="form-field">
+                <label for="mf-url">URL</label>
+                <input
+                  id="mf-url"
+                  type="text"
+                  placeholder="https://example.com/health"
+                  value={url()}
+                  onInput={(e) => setUrl(e.currentTarget.value)}
+                />
+              </div>
+            </Show>
+
+            <Show when={type() === "keyword"}>
+              <div class="form-field">
+                <label for="mf-keyword">Keyword</label>
+                <input
+                  id="mf-keyword"
+                  type="text"
+                  value={keyword()}
+                  onInput={(e) => setKeyword(e.currentTarget.value)}
+                />
+              </div>
+              <div class="form-field">
+                <label for="mf-keyword-mode">Keyword mode</label>
+                <select
+                  id="mf-keyword-mode"
+                  value={keywordMode()}
+                  onChange={(e) => setKeywordMode(e.currentTarget.value)}
+                >
+                  <option value="present">Present</option>
+                  <option value="absent">Absent</option>
+                </select>
+              </div>
+              <label class="form-checkbox">
+                <input
+                  type="checkbox"
+                  checked={keywordCaseSensitive()}
+                  onChange={(e) => setKeywordCaseSensitive(e.currentTarget.checked)}
+                />
+                Case sensitive
+              </label>
+            </Show>
+
+            <Show when={type() === "port" || type() === "ping" || type() === "dns"}>
+              <div class="form-field">
+                <label for="mf-host">Host</label>
+                <input
+                  id="mf-host"
+                  type="text"
+                  placeholder="example.com"
+                  value={host()}
+                  onInput={(e) => setHost(e.currentTarget.value)}
+                />
+              </div>
+            </Show>
+
+            <Show when={type() === "port"}>
+              <div class="form-field">
+                <label for="mf-port">Port</label>
+                <input
+                  id="mf-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  value={portValue() ?? ""}
+                  onInput={(e) =>
+                    setPortValue(e.currentTarget.value === "" ? null : Number(e.currentTarget.value))
+                  }
+                />
+              </div>
+            </Show>
+
+            <Show when={type() === "ping"}>
+              <div class="form-field">
+                <label for="mf-port">Port</label>
+                <input
+                  id="mf-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  placeholder="443, 80 fallback"
+                  value={portValue() ?? ""}
+                  onInput={(e) =>
+                    setPortValue(e.currentTarget.value === "" ? null : Number(e.currentTarget.value))
+                  }
+                />
+              </div>
+            </Show>
+
+            <Show when={type() === "dns"}>
+              <div class="form-field">
+                <label for="mf-dns-record-type">Record type</label>
+                <select
+                  id="mf-dns-record-type"
+                  value={dnsRecordType()}
+                  onChange={(e) => setDnsRecordType(e.currentTarget.value)}
+                >
+                  <For each={DNS_RECORD_TYPES}>{(rt) => <option value={rt}>{rt}</option>}</For>
+                </select>
+              </div>
+              <div class="form-field">
+                <label for="mf-dns-expected-value">Expected value (optional)</label>
+                <input
+                  id="mf-dns-expected-value"
+                  type="text"
+                  value={dnsExpectedValue()}
+                  onInput={(e) => setDnsExpectedValue(e.currentTarget.value)}
+                />
+              </div>
+            </Show>
           </section>
 
           <section class="form-section">
@@ -338,106 +509,108 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
             </div>
           </section>
 
-          <section class="form-section">
-            <h3 class="form-section-title">Validation</h3>
-            <div class="form-field">
-              <label for="mf-codes">Expected status codes</label>
-              <input
-                id="mf-codes"
-                type="text"
-                value={expectedCodes()}
-                onInput={(e) => setExpectedCodes(e.currentTarget.value)}
-              />
-            </div>
-            <label class="form-checkbox">
-              <input
-                type="checkbox"
-                checked={followRedirects()}
-                onChange={(e) => setFollowRedirects(e.currentTarget.checked)}
-              />
-              Follow redirects
-            </label>
-            <label class="form-checkbox">
-              <input
-                type="checkbox"
-                checked={verifySsl()}
-                onChange={(e) => setVerifySsl(e.currentTarget.checked)}
-              />
-              Verify SSL
-            </label>
-          </section>
-
-          <section class="form-section">
-            <h3 class="form-section-title">Advanced</h3>
-            <div class="form-field">
-              <label for="mf-method">Method</label>
-              <select id="mf-method" value={method()} onChange={(e) => setMethod(e.currentTarget.value)}>
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-                <option value="HEAD">HEAD</option>
-              </select>
-            </div>
-
-            <div class="form-field">
-              <label>Request headers</label>
-              <For each={headerRows()}>
-                {(row, i) => (
-                  <div class="header-row">
-                    <input
-                      type="text"
-                      placeholder="Header"
-                      value={row.key}
-                      onInput={(e) => updateHeaderRow(i(), "key", e.currentTarget.value)}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Value"
-                      value={row.value}
-                      onInput={(e) => updateHeaderRow(i(), "value", e.currentTarget.value)}
-                    />
-                    <button type="button" class="btn-link" onClick={() => removeHeaderRow(i())}>
-                      Remove
-                    </button>
-                  </div>
-                )}
-              </For>
-              <button type="button" class="btn-link" onClick={addHeaderRow}>
-                + Add header
-              </button>
-            </div>
-
-            <div class="form-field">
-              <label for="mf-body">Body</label>
-              <textarea id="mf-body" rows={3} value={bodyText()} onInput={(e) => setBodyText(e.currentTarget.value)} />
-            </div>
-
-            <div class="form-field">
-              <label for="mf-auth-type">Auth</label>
-              <select
-                id="mf-auth-type"
-                value={authType()}
-                onChange={(e) => setAuthType(e.currentTarget.value)}
-              >
-                <option value="none">None</option>
-                <option value="basic">Basic</option>
-                <option value="bearer">Bearer</option>
-                <option value="header">Header</option>
-              </select>
-            </div>
-            <Show when={authType() !== "none"}>
+          <Show when={isHttpLike()}>
+            <section class="form-section">
+              <h3 class="form-section-title">Validation</h3>
               <div class="form-field">
-                <label for="mf-auth-value">
-                  Auth value (prefix with "env:" to reference an environment variable)
-                </label>
+                <label for="mf-codes">Expected status codes</label>
                 <input
-                  id="mf-auth-value"
+                  id="mf-codes"
                   type="text"
-                  value={authValue()}
-                  onInput={(e) => setAuthValue(e.currentTarget.value)}
+                  value={expectedCodes()}
+                  onInput={(e) => setExpectedCodes(e.currentTarget.value)}
                 />
               </div>
-            </Show>
-          </section>
+              <label class="form-checkbox">
+                <input
+                  type="checkbox"
+                  checked={followRedirects()}
+                  onChange={(e) => setFollowRedirects(e.currentTarget.checked)}
+                />
+                Follow redirects
+              </label>
+              <label class="form-checkbox">
+                <input
+                  type="checkbox"
+                  checked={verifySsl()}
+                  onChange={(e) => setVerifySsl(e.currentTarget.checked)}
+                />
+                Verify SSL
+              </label>
+            </section>
+
+            <section class="form-section">
+              <h3 class="form-section-title">Advanced</h3>
+              <div class="form-field">
+                <label for="mf-method">Method</label>
+                <select id="mf-method" value={method()} onChange={(e) => setMethod(e.currentTarget.value)}>
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="HEAD">HEAD</option>
+                </select>
+              </div>
+
+              <div class="form-field">
+                <label>Request headers</label>
+                <For each={headerRows()}>
+                  {(row, i) => (
+                    <div class="header-row">
+                      <input
+                        type="text"
+                        placeholder="Header"
+                        value={row.key}
+                        onInput={(e) => updateHeaderRow(i(), "key", e.currentTarget.value)}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Value"
+                        value={row.value}
+                        onInput={(e) => updateHeaderRow(i(), "value", e.currentTarget.value)}
+                      />
+                      <button type="button" class="btn-link" onClick={() => removeHeaderRow(i())}>
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </For>
+                <button type="button" class="btn-link" onClick={addHeaderRow}>
+                  + Add header
+                </button>
+              </div>
+
+              <div class="form-field">
+                <label for="mf-body">Body</label>
+                <textarea id="mf-body" rows={3} value={bodyText()} onInput={(e) => setBodyText(e.currentTarget.value)} />
+              </div>
+
+              <div class="form-field">
+                <label for="mf-auth-type">Auth</label>
+                <select
+                  id="mf-auth-type"
+                  value={authType()}
+                  onChange={(e) => setAuthType(e.currentTarget.value)}
+                >
+                  <option value="none">None</option>
+                  <option value="basic">Basic</option>
+                  <option value="bearer">Bearer</option>
+                  <option value="header">Header</option>
+                </select>
+              </div>
+              <Show when={authType() !== "none"}>
+                <div class="form-field">
+                  <label for="mf-auth-value">
+                    Auth value (prefix with "env:" to reference an environment variable)
+                  </label>
+                  <input
+                    id="mf-auth-value"
+                    type="text"
+                    value={authValue()}
+                    onInput={(e) => setAuthValue(e.currentTarget.value)}
+                  />
+                </div>
+              </Show>
+            </section>
+          </Show>
 
           <Show when={channels().length > 0}>
             <section class="form-section">

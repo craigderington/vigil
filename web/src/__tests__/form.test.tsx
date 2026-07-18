@@ -24,3 +24,34 @@ test("clamps a below-floor custom interval to 15 on save", async () => {
   const dto = createMonitor.mock.calls[0][0];
   expect(dto.interval_seconds).toBeGreaterThanOrEqual(15);
 });
+
+test("type selector: switching to port shows host+port and hides url; saves a port dto", async () => {
+  const createMonitor = vi.fn(async (_dto: any) => ({ id: 2 }));
+  render(() => <MonitorForm api={{ createMonitor } as any} onSaved={()=>{}} onClose={()=>{}} />);
+
+  fireEvent.input(screen.getByLabelText("Name"), { target:{ value:"db" }});
+
+  // default type is http — url field present, host/port not
+  expect(screen.getByLabelText("URL")).toBeTruthy();
+  expect(screen.queryByLabelText("Host")).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "Port" }));
+
+  expect(screen.queryByLabelText("URL")).toBeNull();
+  const host = screen.getByLabelText("Host");
+  const port = screen.getByLabelText("Port");
+  expect(host).toBeTruthy();
+  expect(port).toBeTruthy();
+
+  fireEvent.input(host, { target:{ value:"db.internal" }});
+  fireEvent.input(port, { target:{ value:"5432" }});
+
+  fireEvent.click(screen.getByText(/create monitor/i));
+  await Promise.resolve();
+
+  expect(createMonitor).toHaveBeenCalled();
+  const dto = createMonitor.mock.calls[0][0];
+  expect(dto.type).toBe("port");
+  expect(dto.host).toBe("db.internal");
+  expect(dto.port).toBe(5432);
+});
