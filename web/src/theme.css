@@ -293,6 +293,19 @@ button{font-family:inherit;color:inherit}
 .incident-started,.incident-resolved{color:var(--text-tertiary);white-space:nowrap}
 .incident-detail{color:var(--text-secondary);flex-basis:100%;font-size:12px}
 .incident-row .btn-sm{margin-left:auto;padding:4px 10px;font-size:12px}
+.incident-monitor{font-weight:600;color:var(--text-primary);white-space:nowrap;min-width:140px}
+
+/* ---------- Global incidents screen (§11.8) ---------- */
+.incidents-screen{display:flex;flex-direction:column;gap:20px;max-width:1100px}
+.incidents-header{margin-bottom:0}
+.incidents-stats{display:flex;gap:12px}
+.incidents-stat{
+  background:var(--bg-surface-2);border:1px solid var(--border-subtle);border-radius:var(--r-md);
+  padding:12px 16px;display:flex;flex-direction:column;gap:4px;min-width:120px;
+}
+.incidents-stat-value{font-size:22px;font-weight:600;color:var(--text-primary)}
+.incidents-stat-label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--text-tertiary);font-weight:600}
+.incidents-list-global .incident-row{padding:12px 14px}
 
 /* ---------- Monitor form ---------- */
 .form-body{display:flex;flex-direction:column;gap:24px}

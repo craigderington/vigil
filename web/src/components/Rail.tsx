@@ -1,19 +1,19 @@
 import { createMemo, type Component } from "solid-js";
 
-export type RailView = "dashboard" | "settings";
+export type RailView = "dashboard" | "settings" | "incidents";
 
 export interface RailProps {
   monitors: any[];
   /** Which top-level view is active; drives `aria-current`. Defaults to "dashboard". */
   activeView?: RailView;
   /** Fired with the clicked item's key. Items without a wired screen yet
-   * (Incidents/Notifications/Maintenance) still fire so a future screen can
-   * hook in; App.tsx currently routes anything but "settings" back to the
-   * dashboard grid. */
-  onNavigate?: (key: RailView | "incidents" | "notifications" | "maintenance") => void;
+   * (Notifications/Maintenance) still fire so a future screen can hook in;
+   * App.tsx currently routes anything but "settings"/"incidents" back to
+   * the dashboard grid. */
+  onNavigate?: (key: RailView | "notifications" | "maintenance") => void;
 }
 
-const NAV_ITEMS: { icon: string; label: string; key: RailView | "incidents" | "notifications" | "maintenance" }[] = [
+const NAV_ITEMS: { icon: string; label: string; key: RailView | "notifications" | "maintenance" }[] = [
   { icon: "▣", label: "Dashboard", key: "dashboard" },
   { icon: "⚠", label: "Incidents", key: "incidents" },
   { icon: "\u{1F514}", label: "Notifications", key: "notifications" },
