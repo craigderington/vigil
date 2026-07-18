@@ -160,6 +160,37 @@ pub fn parse_rdap(json: &serde_json::Value) -> Option<DomainResult> {
     })
 }
 
+/// Disposition of an RDAP HTTP status code, decoupled from any I/O so it
+/// can be unit-tested without a live server. Pure function of the status
+/// code alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RdapDisposition {
+    /// 2xx — parse the body as an RDAP domain object.
+    Ok,
+    /// 404 — RDAP has no record; fall back to WHOIS.
+    Whois,
+    /// 429 (rate-limited), 403 (a common rate-limit/deny signal from RDAP
+    /// proxies), or 5xx (server error) — retry later, not a final answer.
+    Transient,
+    /// Any other non-success status (400/401/etc.) — RDAP definitively
+    /// declined to answer.
+    NotQueryable,
+}
+
+/// Classifies a raw RDAP HTTP status code into a [`RdapDisposition`]. Pure,
+/// no I/O — see the unit tests below for the exact routing table.
+fn classify_rdap_status(status: u16) -> RdapDisposition {
+    if (200..300).contains(&status) {
+        RdapDisposition::Ok
+    } else if status == 404 {
+        RdapDisposition::Whois
+    } else if status == 429 || status == 403 || (500..600).contains(&status) {
+        RdapDisposition::Transient
+    } else {
+        RdapDisposition::NotQueryable
+    }
+}
+
 /// Runs a domain-expiry check for `host`. Reduces to the registrable
 /// domain, queries RDAP first, then falls back to WHOIS for domains RDAP
 /// doesn't know about. Never panics; every network/parse failure is
@@ -177,8 +208,8 @@ pub async fn check(host: &str, timeout_secs: u64) -> DomainResult {
     match response {
         Ok(resp) => {
             let status = resp.status();
-            if status.is_success() {
-                match resp.json::<serde_json::Value>().await {
+            match classify_rdap_status(status.as_u16()) {
+                RdapDisposition::Ok => match resp.json::<serde_json::Value>().await {
                     Ok(json) => match parse_rdap(&json) {
                         Some(result) if result.expiry_date.is_some() => result,
                         // RDAP answered but had no expiration event (or no
@@ -186,19 +217,29 @@ pub async fn check(host: &str, timeout_secs: u64) -> DomainResult {
                         // transient, not queryable.
                         _ => DomainResult::not_queryable("rdap"),
                     },
-                    // A 200 with an unparseable body is still a real
-                    // response from the RDAP aggregator, not a network
-                    // hiccup — treat as a definitive non-answer rather
-                    // than transient.
-                    Err(_) => DomainResult::not_queryable("rdap"),
-                }
-            } else if status.as_u16() == 404 {
-                whois_fallback(&d, timeout_secs).await
-            } else if status.as_u16() == 429 || status.is_server_error() {
-                DomainResult::transient()
-            } else {
-                // Any other 4xx: RDAP definitively declined to answer.
-                DomainResult::not_queryable("rdap")
+                    // reqwest's per-request `.timeout()` covers the whole
+                    // response lifecycle, INCLUDING body streaming — so a
+                    // `.json()` error after a 200 status has two very
+                    // different causes. `is_decode()` means the body fully
+                    // arrived and failed to parse as JSON: a real response
+                    // from the aggregator, just not a usable one — a
+                    // definitive non-answer. Anything else here (timeout,
+                    // body/IO error, connection reset) fired mid-stream —
+                    // a network hiccup, not an answer, so it must not be
+                    // reported as a definitive `queryable: false` (Task 7
+                    // would persist a false "not queryable" over a
+                    // possibly-real expiry).
+                    Err(e) => {
+                        if e.is_decode() {
+                            DomainResult::not_queryable("rdap")
+                        } else {
+                            DomainResult::transient()
+                        }
+                    }
+                },
+                RdapDisposition::Whois => whois_fallback(&d, timeout_secs).await,
+                RdapDisposition::Transient => DomainResult::transient(),
+                RdapDisposition::NotQueryable => DomainResult::not_queryable("rdap"),
             }
         }
         // Connection refused, DNS failure, TLS error, or a timeout that
@@ -350,4 +391,48 @@ async fn whois_fallback(domain: &str, timeout_secs: u64) -> DomainResult {
     };
 
     parse_whois(&whois_resp)
+}
+
+#[cfg(test)]
+mod status_classification_tests {
+    use super::{classify_rdap_status, RdapDisposition};
+
+    #[test]
+    fn success_2xx_is_ok() {
+        assert_eq!(classify_rdap_status(200), RdapDisposition::Ok);
+    }
+
+    #[test]
+    fn not_found_falls_back_to_whois() {
+        assert_eq!(classify_rdap_status(404), RdapDisposition::Whois);
+    }
+
+    #[test]
+    fn rate_limited_is_transient() {
+        assert_eq!(classify_rdap_status(429), RdapDisposition::Transient);
+    }
+
+    #[test]
+    fn server_error_is_transient() {
+        assert_eq!(classify_rdap_status(500), RdapDisposition::Transient);
+    }
+
+    #[test]
+    fn service_unavailable_is_transient() {
+        assert_eq!(classify_rdap_status(503), RdapDisposition::Transient);
+    }
+
+    #[test]
+    fn forbidden_is_transient_not_definitive() {
+        // 403 is a common rate-limit/deny signal from RDAP proxies —
+        // treat as retryable, NOT a definitive "not queryable" (a
+        // misclassification here would let Task 7 persist a false
+        // "not queryable" over a possibly-real expiry).
+        assert_eq!(classify_rdap_status(403), RdapDisposition::Transient);
+    }
+
+    #[test]
+    fn other_client_error_is_not_queryable() {
+        assert_eq!(classify_rdap_status(400), RdapDisposition::NotQueryable);
+    }
 }
