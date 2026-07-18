@@ -1,9 +1,9 @@
 # Vigil P2 (Signal) — Design Spec
 
-> **Status:** autonomous build (user delegated approval) · **Date:** 2026-07-17 · **Base:** P1 on `master` (2d1977c)
-> **Scope:** Phase 2 "Signal" per [`CLAUDE.md`](../../../CLAUDE.md) §14. Builds on the P1 architecture; inherits all P1 decisions (containerized axum + SolidJS, rustls, SQLite/WAL, uptime-from-incidents, ports 8090/8099).
+> **Status:** autonomous build (user delegated approval) · **Date:** 2026-07-17 · **Revision:** v2 (spec-review-hardened) · **Base:** P1 on `master` (2d1977c)
+> **Scope:** Phase 2 "Signal" per [`CLAUDE.md`](../../../CLAUDE.md) §14. Builds on P1; inherits all P1 decisions (containerized axum + SolidJS, rustls, SQLite/WAL, uptime-from-incidents, ports 8090/8099).
 
-Design decisions here were made autonomously (user asleep, explicit "auto mode" mandate), grounded in `CLAUDE.md` §3 (monitor types), §9 (schema), §11.4–11.6 (list view / 90-day bar / detail panel), and the P1 conventions. Where this doc and `CLAUDE.md` differ, this doc wins for P2.
+Design decisions made autonomously (explicit "auto mode" mandate), grounded in `CLAUDE.md` §3/§9/§11 and the P1 code. v2 incorporates the multi-lens spec review (changelog §12). Where this doc and `CLAUDE.md` differ, this doc wins for P2.
 
 ---
 
@@ -11,108 +11,124 @@ Design decisions here were made autonomously (user asleep, explicit "auto mode" 
 
 The dashboard tells the full story at a glance:
 
-1. **New monitor types work end-to-end:** Keyword, TCP-Port, DNS, and Ping (TCP-ping) monitors can be created, are probed correctly, and transition UP/DOWN through the same state machine + anchor gate as HTTP.
-2. **Response-time chart:** the detail panel shows a real response-time line/area chart over a selectable range, with incident spans shaded.
-3. **90-day uptime bars:** the signature per-day bar (color-graded by that day's rollup) renders on cards and the detail panel, with hover tooltips.
-4. **Daily rollups:** a nightly job aggregates the previous day's raw checks into `check_aggregates_daily`; 30d/90d stats and bars read from durable aggregates, so they stay correct after raw checks are pruned.
-5. **Incident history:** the detail panel shows a reverse-chronological incident timeline (cause, started, duration, resolved, status/error), and incidents can be **acknowledged**; a global Incidents screen lists incidents across monitors.
-6. **List view:** a dense sortable table alternative to the grid, toggled from the top bar.
-7. All new logic is TDD-tested; `cargo test` + `vitest` green; Docker container still healthy; migration `0002` applies cleanly on top of a P1 database (and the migration runner is hardened to tolerate SQL comments).
+1. **New monitor types work end-to-end:** Keyword, TCP-Port, DNS, Ping (TCP-ping) — created, probed correctly, transitioning UP/DOWN through the same state machine + anchor gate as HTTP.
+2. **Response-time chart** in the detail panel over a selectable range, incident spans shaded.
+3. **90-day uptime bars** (color-graded per-day) on cards and the detail panel, with hover tooltips.
+4. **Daily rollups:** a nightly job (with multi-day catch-up) aggregates completed days' raw checks into `check_aggregates_daily`; 30d/90d avg-response reads from durable aggregates so it survives raw-check pruning.
+5. **Incident history:** detail-panel incident timeline + **acknowledge**; a global Incidents screen.
+6. **List view:** dense sortable table, toggled from the top bar.
+7. All new logic TDD-tested; `cargo test` + `vitest` green; Docker healthy; **migration `0002` applies on top of a P1 database** via a restructured version-ordered runner.
 
 ---
 
 ## 2. Scope
 
-### 2.1 In scope (P2)
-- **Monitor types:** `keyword`, `port`, `ping`, `dns` (plus existing `http`). Ping is **TCP-ping only** (P1 §15 decision — no raw ICMP).
-- **Probe dispatch:** refactor the P1 HTTP prober into a `probe::run(&Monitor) -> ProbeOutcome` dispatcher by `monitor.type`.
-- **Schema (migration `0002`):** add monitor columns (`host, port, keyword, keyword_mode, keyword_case_sensitive, dns_record_type, dns_expected_value`) and the `check_aggregates_daily` table. **Harden the migration runner** to strip `--` line comments before splitting on `;` (the P1 carry-forward, now that a 2nd migration lands).
-- **Daily rollups:** extend the nightly maintenance task to roll up the previous day's `checks` into `check_aggregates_daily` (up/down counts, avg/min/max response, uptime%, incident count) **before** pruning raw checks.
-- **Stats & series:** extend `get_stats` to 30d/90d; add `get_response_series(id, range)` (raw checks) and `get_uptime_bars(id, days=90)` (per-day from incidents + aggregates).
-- **Incidents:** `list_incidents(monitor_id?, range?)` + `acknowledge_incident(id)` endpoints; detail-panel incident timeline; global Incidents screen.
-- **Frontend:** response-time chart (uPlot), 90-day uptime bar component (cards + panel), list view toggle, incident timeline, and monitor-form fields for the new types.
+### 2.1 In scope
+- **Monitor types:** `keyword`, `port`, `ping`, `dns` (+ existing `http`). Ping = **TCP-ping only** (P1 §15).
+- **Probe dispatch:** `probe::run(&Monitor) -> ProbeOutcome` dispatching on `monitor.type`.
+- **Migration runner restructure** (see §3.1) + migration `0002` (§4).
+- **Daily rollups** with catch-up (§6); shared aggregate-ensure for read endpoints.
+- **Stats/series/bars** endpoints (§7).
+- **Incidents** list + acknowledge (§7); detail-panel timeline; global Incidents screen.
+- **Frontend:** response chart (uPlot, bundled), 90-day bar, list view, incident timeline, monitor-form type fields, detail-panel tiles extended to 24h/7d/30d/90d.
 
 ### 2.2 Out of scope (deferred)
-- **DEGRADED** state + response-time thresholds (`degraded_threshold_ms`) — not in the §14 P2 list; the `degraded_count` aggregate column exists but stays 0 in P2. Deferred.
-- SSL/domain tracking (P3), heartbeat monitors (P4), non-email channels (P3), maintenance windows / reports (P4), the accent/theme picker.
-- MX/TXT/NS DNS records beyond basic resolution matching are supported but not deeply validated; A/AAAA/CNAME are the primary tested paths.
+- **DEGRADED** state + `degraded_threshold_ms` — not in §14 P2; `degraded_count` column exists, stays 0.
+- SSL/domain (P3), heartbeat (P4), non-email channels (P3), maintenance windows/reports (P4), theme picker.
+- **Acknowledge is a flag only** in P2 (sets `acknowledged=1`, shown in UI); its functional consumer (re-notify suppression) is P4.
 
 ---
 
-## 3. Architecture deltas (from P1)
+## 3. Architecture deltas
 
-1. **`probe` module** gains `run(&Monitor) -> ProbeOutcome` that dispatches on `monitor.r#type`:
-   - `http` / `keyword` → `probe::http` (keyword adds a body-content assertion).
-   - `port` → `probe::tcp` (TCP connect to `host:port`).
-   - `ping` → `probe::tcp` in ping mode (connect to `host:port`, default port 443 then 80).
-   - `dns` → `probe::dns` (hickory-resolver).
-   `worker::run_check` calls `probe::run` instead of `probe::http::probe`.
-2. **Migration `0002`** adds columns + the aggregates table. The **migration runner** (`db.rs`) is hardened: strip `-- …` line comments per line before joining + `split(';')`, so migration files can carry normal SQL comments (fixes the P1 carry-forward). A test asserts a comment-bearing migration applies.
-3. **`rollup` module** (`maintenance.rs` extension): `rollup_day(pool, day)` computes a `check_aggregates_daily` row per monitor for a given local day from raw `checks` + `incidents`; the nightly task rolls up yesterday, then prunes.
-4. **New read endpoints** in `api/monitors.rs` (series, bars) + `api/incidents.rs` (list, acknowledge). Stats extended.
-5. **Frontend:** `uPlot` dependency (bundled, self-contained) for the response chart; a `UptimeBar` component; a `ListView`; an `IncidentTimeline`; monitor-form type-specific fields.
-6. **New Rust deps:** `hickory-resolver` (DNS). TCP uses `tokio::net`. No openssl (rustls stays).
+### 3.1 Migration runner restructure (load-bearing)
+The P1 runner (`db.rs`) is hardcoded single-shot (checks `version=1`, `include_str!("0001_init.sql")`, inserts 1). **Restructure** it to an ordered list and apply every not-yet-applied version:
+```rust
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/0001_init.sql")),
+    (2, include_str!("../migrations/0002_signal.sql")),
+];
+// run_migrations: ensure schema_migrations exists; for each (v, sql) in MIGRATIONS,
+//   if no row WHERE version=v: in a tx, apply sql (split into statements), INSERT (v, now).
+```
+On a P1 database, version 1 is already recorded → only `0002` applies. On a fresh DB, both apply in order. **Statement splitting is hardened**: strip `--` line comments per line before joining and `split(';')` (defensive; also lets `0002` carry normal comments). Record `applied_at = now` (real epoch, fixing the P1 `applied_at=0` minor). A test asserts `0002` applies on a fresh DB **and** on a DB already at version 1, and that a comment-bearing statement applies.
+
+### 3.2 Other deltas
+- **`probe::run`** dispatches: `http`/`keyword`→`probe::http`; `port`/`ping`→`probe::tcp`; `dns`→`probe::dns`. `worker::run_check` calls `probe::run` (was `probe::http::probe`). New `Cause::Keyword`.
+- **`rollup` module** (in `maintenance.rs` or `rollup.rs`): `rollup_day(pool, day_utc)` writes one `check_aggregates_daily` row per monitor for a **completed** day; `rollup_catch_up(pool)` rolls up every completed day since the last stored aggregate, bounded by raw-check retention. Nightly task + a one-shot at startup call `rollup_catch_up`.
+- **New endpoints** (§7): series, bars, incidents list/ack; stats extended.
+- **Frontend:** `uPlot` dep (bundled, self-contained). New components (§8).
+- **New Rust deps:** `hickory-resolver` (DNS, tokio+rustls). TCP via `tokio::net`. No openssl.
 
 ---
 
-## 4. Data model — migration `0002`
+## 4. Data model — migration `0002_signal.sql`
 
 ```sql
--- 0002_signal.sql (runner strips -- comments, splits on ;)
 ALTER TABLE monitors ADD COLUMN host TEXT;
 ALTER TABLE monitors ADD COLUMN port INTEGER;
 ALTER TABLE monitors ADD COLUMN keyword TEXT;
-ALTER TABLE monitors ADD COLUMN keyword_mode TEXT;            -- present|absent
+ALTER TABLE monitors ADD COLUMN keyword_mode TEXT;
 ALTER TABLE monitors ADD COLUMN keyword_case_sensitive INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE monitors ADD COLUMN dns_record_type TEXT;        -- A|AAAA|CNAME|MX|TXT|NS
+ALTER TABLE monitors ADD COLUMN dns_record_type TEXT;
 ALTER TABLE monitors ADD COLUMN dns_expected_value TEXT;
+
+ALTER TABLE incidents ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
 
 CREATE TABLE check_aggregates_daily (
   monitor_id      INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
   day             TEXT NOT NULL,                 -- YYYY-MM-DD (UTC)
   up_count        INTEGER NOT NULL DEFAULT 0,
   down_count      INTEGER NOT NULL DEFAULT 0,
-  degraded_count  INTEGER NOT NULL DEFAULT 0,    -- P2: always 0 (DEGRADED deferred)
+  degraded_count  INTEGER NOT NULL DEFAULT 0,    -- P2: always 0
   avg_response_ms REAL,
   min_response_ms INTEGER,
   max_response_ms INTEGER,
-  uptime_pct      REAL,
+  uptime_pct      REAL,                          -- stored for P4 durable reports (completed days)
   incident_count  INTEGER NOT NULL DEFAULT 0,
+  sample_count    INTEGER NOT NULL DEFAULT 0,    -- up_count+down_count, for count-weighted 30d/90d avg
   PRIMARY KEY (monitor_id, day)
 );
+CREATE INDEX idx_aggregates_day ON check_aggregates_daily(monitor_id, day);
 ```
 
-Migration `0002` is recorded as version 2 by the runner. `ALTER TABLE ADD COLUMN` is safe on SQLite (the columns are nullable or have defaults). `monitors.type` CHECK is not enforced by DDL (app validates); the new types are `keyword|port|ping|dns`.
-
-The `Monitor` struct + `FromRow` (`models.rs`) gain the new fields; `CreateMonitorDto`/`UpdateMonitorDto` gain them (all optional).
+All `ALTER TABLE ADD COLUMN` are SQLite-safe (nullable or defaulted). `Monitor` struct + manual `FromRow` gain the 7 monitor fields; `Incident` gains `acknowledged`. `CreateMonitorDto`/`UpdateMonitorDto` gain them **and** a `type` field (see §5).
 
 ---
 
-## 5. Monitor types & probers
+## 5. Monitor types, DTO, & probers
 
-All probers return the existing `ProbeOutcome { ok, response_time_ms, status_code, error_message, resolved_ip, cause }` and feed the **unchanged** state machine + anchor gate. Timing via `Instant`.
+**DTO changes (`models.rs`) — required, per review:** `CreateMonitorDto` gains `#[serde(default = d_http)] r#type: String` and its `url` becomes `Option<String>`; it gains `host: Option<String>, port: Option<i64>, keyword, keyword_mode, keyword_case_sensitive (default 0), dns_record_type, dns_expected_value`. The `create()` handler threads `type` into the INSERT column list (no longer hardcoded `'http'`) and replaces the unconditional "url required" check with the **per-type validation** below. `UpdateMonitorDto` gains the same optional fields.
 
-- **Keyword** (`probe::http`, keyword mode): perform the HTTP fetch as for `http`, then if `keyword` is set, read the body and check `keyword_mode`: `present` → body must contain the keyword; `absent` → body must NOT contain it. Respect `keyword_case_sensitive` (default case-insensitive). On keyword failure → `ok=false, cause=Cause::Keyword` (new cause variant), even if the status code matched. Status-code rule still applies first.
-- **TCP Port** (`probe::tcp::connect`): `tokio::net::TcpStream::connect((host, port))` within `timeout_seconds`. Success if connected. Failure cause `Cause::Connection` (or `Cause::Timeout`). Requires `host` + `port`.
-- **Ping** (TCP-ping, `probe::tcp::ping`): connect to `host:port` where port defaults to 443 then 80 if `port` is null; success if either connects. Cause `Connection`/`Timeout`. Surfaced in the UI as "TCP-ping" so results aren't misread (per `CLAUDE.md` §3 note).
-- **DNS** (`probe::dns`): use `hickory-resolver` (system config) to resolve `host` for `dns_record_type` (A/AAAA/CNAME/MX/TXT/NS). Success if resolution returns ≥1 record **and**, if `dns_expected_value` is set, at least one record's string form contains/equals it. `resolved_ip` set to the first A/AAAA answer where applicable. Failure cause `Cause::Dns`.
+**Per-type validation (422 on failure):**
+- `http`/`keyword`: `url` required. `keyword`: `keyword` + `keyword_mode` (present|absent) required.
+- `port`: `host` + `port` required. `ping`: `host` required (`port` optional). `dns`: `host` + `dns_record_type` (A|AAAA|CNAME|MX|TXT|NS) required.
+- Interval floor 15s applies to all.
 
-**New `Cause` variant:** `Keyword`. (`Cause` enum: `Timeout, Status, Connection, Dns, Keyword`.) Incident `cause` TEXT accordingly.
+**Probers** (all return the existing `ProbeOutcome`; timing via `Instant`; feed the unchanged state machine + anchor gate):
+- **Keyword** (`probe::http`): the HTTP fetch as for `http`; status-code rule first. If it passes and `keyword` is set, read **at most 2 MiB** of the body (`resp.bytes()` bounded; a larger body is truncated and matched only within the read prefix), decode **lossy UTF-8**, honor `keyword_case_sensitive` (default insensitive), and check `keyword_mode`: `present`→must contain; `absent`→must not. Keyword failure → `ok=false, cause=Cause::Keyword` (status was fine).
+- **TCP Port** (`probe::tcp::connect`): `tokio::time::timeout(timeout, TcpStream::connect((host, port)))`. Connected→ok. Cause `Timeout` on elapse, else `Connection`.
+- **Ping** (`probe::tcp::ping`): if `port` is set → single attempt to `host:port`. If `port` is null → try **443 then 80 sequentially**, each bounded by full `timeout_seconds`; success if either connects; any 443 failure (refused or timeout) proceeds to 80. `response_time_ms` = the successful attempt's latency. Cause `Connection`/`Timeout`. UI labels this "TCP-ping".
+- **DNS** (`probe::dns`, hickory-resolver from system config): resolve `host` for `dns_record_type`. Success if ≥1 record returned **and**, if `dns_expected_value` set, at least one record's canonical string form **case-insensitively contains** it. Canonical forms: A/AAAA→IP string; CNAME/NS→target host (trailing dot trimmed); MX→`"<pref> <host>"`; TXT→concatenated segments. `resolved_ip`←first A/AAAA. Failure cause `Cause::Dns`.
 
-**Validation (API):** `http`/`keyword` require `url`; `port`/`ping`/`dns` require `host` (`port` required for `port`); `dns` requires `dns_record_type`. `keyword` requires `keyword` + `keyword_mode`. Interval floor 15s still applies.
+`Cause` enum becomes `Timeout, Status, Connection, Dns, Keyword`. `test-check` supports all types.
 
 ---
 
 ## 6. Daily rollups
 
-`rollup::rollup_day(pool, day: &str /* YYYY-MM-DD UTC */) -> Result<()>`: for each monitor with checks on that day, compute from raw `checks` where `checked_at` ∈ [day 00:00, next day 00:00) UTC:
-- `up_count` = count(status='up'), `down_count` = count(status='down'), `degraded_count` = 0.
+`rollup_day(pool, day: &str /* YYYY-MM-DD UTC, a COMPLETED day */) -> Result<()>` — per monitor with any check that day (checks in `[day_start, day_end)` UTC):
+- `up_count`/`down_count` from `checks.status`; `degraded_count`=0; `sample_count`=up+down.
 - `avg/min/max_response_ms` from non-null `response_time_ms`.
-- `incident_count` = incidents that **started** that day.
-- `uptime_pct` = time-weighted from incident spans clipped to the day (reuse `uptime::compute` over the day window) — falls back to count-based (`up/(up+down)`) only if no incident data; store the % .
+- `incident_count` = incidents whose `started_at` ∈ `[day_start, day_end)` (**started-that-day**).
+- `uptime_pct` = time-weighted via `uptime::compute` over the day window, fed **overlap-based** incident spans: `SELECT started_at, resolved_at FROM incidents WHERE monitor_id=? AND started_at < day_end AND (resolved_at IS NULL OR resolved_at > day_start)`, clipped to `[day_start, day_end]`. (A completed day uses the full `day_end` as clip end.)
 - Upsert into `check_aggregates_daily` (`ON CONFLICT(monitor_id,day) DO UPDATE`).
 
-The nightly maintenance loop: on each daily pass, `rollup_day(yesterday_utc)` (idempotent), **then** prune raw checks older than retention, **then** weekly `incremental_vacuum`. Rollups are also computed on-demand for any day missing an aggregate when the 90-day-bars endpoint runs (lazy backfill), so a fresh install / recently-restarted instance still shows bars.
+`rollup_catch_up(pool)`: find `MAX(day)` per monitor in aggregates (or the oldest raw check within retention if none), and `rollup_day` **every completed day** from there through **yesterday** (UTC), bounded to days still within `raw_retention_days` (older days have no raw checks to source). Called nightly **and** once at startup — so multi-day downtime doesn't permanently lose days.
+
+**Today is never stored as an aggregate** (it's incomplete). Live per-day values for today come from incidents + recent checks at read time (§7).
+
+**Shared read-path ensure:** `ensure_aggregates(pool, monitor_id, since_day)` runs a **bounded** catch-up (completed days since the monitor's last aggregate, still within retention) before a read endpoint uses aggregates. After the nightly/startup catch-up this is cheap (usually a no-op); it caps work at the retention window (≤30 completed days), never 90 inline rollups.
 
 ---
 
@@ -121,43 +137,49 @@ The nightly maintenance loop: on each daily pass, `rollup_day(yesterday_utc)` (i
 ```
 Stats     GET /api/monitors/:id/stats?range=24h|7d|30d|90d
               -> {uptime_pct|null, downtime_seconds, avg_ms|null, incidents}
-              (uptime/downtime still from incidents; avg from raw checks for ≤7d, from aggregates for 30d/90d)
+              uptime/downtime: incidents (overlap, clip to now) — unchanged from P1, extended windows.
+              avg_ms: ≤7d from raw checks; 30d/90d COUNT-WEIGHTED from aggregates
+                = sum(avg_response_ms*sample_count)/sum(sample_count) over days with non-null avg,
+                after ensure_aggregates. Plus today's raw-check avg blended in (count-weighted).
 Series    GET /api/monitors/:id/series?range=24h|7d
-              -> [{t: epoch, ms: number|null, status: "up"|"down"}]  (raw checks, capped ~500 points)
+              -> [{t, ms|null, status}]  bucketed: divide the window into <=300 equal time-slots;
+                 per slot emit avg(response_time_ms) + worst status (down if any down). Empty slots omitted.
 Bars      GET /api/monitors/:id/bars?days=90
-              -> [{day:"YYYY-MM-DD", uptime_pct|null, incidents, down_seconds, has_data}]
-              (per-day from incidents for uptime/down, aggregates for has_data; lazy-backfills missing days)
-Incidents GET /api/incidents?monitor_id=&range=30d   -> [{id, monitor_id, monitor_name, started_at, resolved_at,
-              duration_seconds, cause, status_code, error_message, acknowledged}]
-          POST /api/incidents/:id/acknowledge         -> 200 (sets acknowledged=1)
+              -> [{day, uptime_pct|null, incidents, down_seconds, has_data}]
+                 uptime/down per day computed from INCIDENTS (overlap, clip end = min(day_end, now)),
+                 so today is live & correct. has_data = aggregate exists for the day OR (day within
+                 retention AND a check exists) OR any incident overlaps the day. calls ensure_aggregates.
+Incidents GET /api/incidents?monitor_id=&range=30d
+              -> [{id, monitor_id, monitor_name, started_at, resolved_at, duration_seconds,
+                   cause, status_code, error_message, acknowledged}]
+          POST /api/incidents/:id/acknowledge   -> 200 (UPDATE incidents SET acknowledged=1)
 ```
-
-Monitor create/update accept the new type fields; validation per §5. `test-check` supports all types.
 
 ---
 
 ## 8. Frontend
 
-- **Response-time chart** (`ResponseChart.tsx`, detail panel §11.6.4): **uPlot** (bundled). Fetch `/series?range`; render an area/line of ms over time; range selector (24h/7d); shade incident spans (from `/incidents`) beneath. Respect reduced-motion (no animation). Theme via CSS vars.
-- **90-day uptime bar** (`UptimeBar.tsx`, §11.5): thin rounded segment per day from `/bars`; color = `--up` (100%), `--degraded` (partial/slow), `--down` (outage, intensity ∝ downtime), `--border-default` (no data). Hover tooltip: date · uptime% · incidents · downtime. Used on cards (compact ~45-seg) and the detail panel (full 90). Click a segment → filter incident timeline to that day (panel).
-- **Incident timeline** (`IncidentTimeline.tsx`, §11.6.8): reverse-chron list in the detail panel — cause icon, started, duration (live-ticking if ongoing), resolved, status/error, **Acknowledge** button (ongoing).
-- **Incidents screen** (`Incidents.tsx`, §11.8): global timeline via `/api/incidents`; filter by monitor/range; header stats (open incidents, MTTR, 30d count); acknowledge inline. Rail gains an Incidents nav item.
-- **List view** (`ListView.tsx`, §11.4): dense sortable table — `● | Name | Type | Last check | Response | 24h | 7d | 30d | ▍bar | ⋯`. Top-bar grid⇄list toggle (a `view` signal, persisted in the store).
-- **Monitor form** (`MonitorForm.tsx`): type selector (http/keyword/port/ping/dns) reveals type-specific fields — url (http/keyword), keyword+mode+case (keyword), host+port (port/ping), host+record-type+expected (dns). Test-check works per type.
-- **Cards** gain the compact 90-day bar (replacing the P1 placeholder strip).
+- **Detail-panel uptime tiles** extended to **24h · 7d · 30d · 90d** (each with period downtime beneath), wired to the extended stats endpoint (blueprint §11.6.3).
+- **Response-time chart** (`ResponseChart.tsx`, uPlot, bundled): fetch `/series?range` (24h/7d selector); area/line of ms; shade incident spans fetched from `/api/incidents?monitor_id=:id`, clipped to the selected range (open incidents extended to now). Reduced-motion respected; theme via CSS vars.
+- **90-day uptime bar** (`UptimeBar.tsx`): a segment per day from `/bars`. **Color bands** (P2, no DEGRADED state but the bar itself is graded by day uptime%): `uptime_pct == 100` (or has_data with no downtime) → `--up`; `50 ≤ uptime% < 100` → `--degraded` (amber, shade darker as uptime falls); `uptime% < 50` → `--down`; `!has_data` → `--border-default`. Hover tooltip: date · uptime% · incidents · downtime. Compact ~45-seg variant on cards; full 90-seg on the panel with **"90 days ago"/"Today" end labels + a faint legend row**. Click a panel segment → filter the incident timeline to that day.
+- **Incident timeline** (`IncidentTimeline.tsx`, panel): reverse-chron; cause icon, started, duration (live-ticking if ongoing), resolved, status/error, **Acknowledge** button (ongoing/unacked → `POST /incidents/:id/acknowledge`, then refresh).
+- **Incidents screen** (`Incidents.tsx`): global list via `/api/incidents`; filter by monitor/range; header stats (open incidents, MTTR, 30d count); acknowledge inline. Rail gains an Incidents nav item.
+- **List view** (`ListView.tsx`): dense table `● | Name | Type | Last check | Response | 24h | 7d | 30d | ▍bar | ⋯`. Sortable headers; **default sort = `sort_order` then name**; the active sort column+direction and the grid⇄list `view` choice **persist in the store** (in-memory; survives view toggles this session). Top-bar grid⇄list toggle.
+- **Monitor form** (`MonitorForm.tsx`): a **type selector** (http/keyword/port/ping/dns) reveals type-specific fields — url (http/keyword); keyword+mode+case (keyword); host+port (port); host+optional-port (ping); host+record-type+expected (dns). Sends `type` + the relevant fields. Test-check works per type.
+- **Cards** show the real compact 90-day bar (replacing the P1 placeholder strip).
 
-Frontend keeps the pure-`applyEvent` reducer + navy tokens. New charts must be self-contained (uPlot bundled, no external CDN).
+Frontend keeps the pure `applyEvent` reducer + navy tokens; uPlot is bundled (no CDN).
 
 ---
 
 ## 9. Testing
 
-- **Pure/unit (TDD):** keyword match logic (present/absent × case), DNS expected-value match, rollup aggregation math, `Cause::Keyword` classification, bars per-day computation, the hardened migration comment-stripper.
-- **Prober integration:** keyword (wiremock body), TCP port (a bound `TcpListener`), DNS (resolve `localhost`/a known name, or an injectable resolver), ping (bound listener). Each asserts the classified `ProbeOutcome`.
-- **API:** create each monitor type (validation), series/bars/stats-30d/90d shapes, incident list + acknowledge, rollup-then-stats.
-- **DB:** migration `0002` applies on a fresh DB **and** on a P1 DB (idempotent version check); comment-bearing migration applies.
-- **Frontend:** `applyEvent` unchanged; component sanity for UptimeBar (colors from bars data), ListView, the form's type-field reveal; ResponseChart mounts without crashing on empty series.
-- **Acceptance:** create one monitor of each type against local targets; verify probe results + a rollup + bars + series + an incident timeline; Docker still healthy.
+- **Pure/unit (TDD):** keyword match (present/absent × case, prefix-truncation), DNS expected-value canonical-form match, rollup aggregation math (incl. overlap span → correct uptime), count-weighted avg, series bucketing, bar color-band mapping, the migration comment-strip + multi-version apply, `Cause::Keyword`.
+- **Prober integration:** keyword (wiremock body, present/absent/large-body), TCP port (bound `TcpListener` up + refused down), ping (bound listener; null-port fallback), DNS (injectable resolver or resolve `localhost`).
+- **API:** create each type (validation 422 paths incl. missing host/url/type), series/bars/stats-30d/90d shapes, incident list + acknowledge (flag flips), rollup_day + ensure_aggregates then stats.
+- **DB:** `0002` applies on a fresh DB **and** on a version-1 DB (idempotent, only 2 applies); comment-bearing statement applies; cascade still works.
+- **Frontend:** `applyEvent` unchanged; UptimeBar color-band from bars data; ListView sort; form type-field reveal; ResponseChart mounts on empty series without crashing.
+- **Acceptance:** one monitor of each type against local targets; verify probe results, a rollup, bars, series, an incident timeline + acknowledge; Docker healthy; `0002` on a real P1 DB.
 
 ---
 
@@ -165,35 +187,43 @@ Frontend keeps the pure-`applyEvent` reducer + navy tokens. New charts must be s
 
 | # | Decision | Choice |
 |---|---|---|
-| 1 | Migration runner hardening (P1 carry-forward) | **Harden now** (0002 lands): strip `--` line comments before `split(';')`; keeps the no-build-time-DB runner. |
-| 2 | Ping | TCP-ping only (P1 §15), connect to `host:port` (default 443→80). |
-| 3 | DNS resolver | `hickory-resolver` (new dep). |
-| 4 | Response chart lib | **uPlot** (tiny, bundled, self-contained). |
-| 5 | DEGRADED state | **Deferred** (not in §14 P2 list); `degraded_count` column exists, stays 0. |
-| 6 | Uptime source | Still **incidents** (P1); aggregates provide response-time history + bar has-data + 30d/90d avg. |
-| 7 | Bars lazy-backfill | The bars endpoint computes/upserts missing daily aggregates on demand, so fresh/restarted instances show history. |
-| 8 | New `Cause` | `Keyword` (keyword assertion failed despite status match). |
-| 9 | Probe dispatch | `probe::run(&Monitor)` matches on type → http/tcp/dns; worker calls it. |
-| 10 | Global Incidents screen | Included (basic) — Rail nav + list + acknowledge. |
+| 1 | Migration runner | **Restructure to a version-ordered list** applying each unapplied version; comment-strip is defensive layering. Real `applied_at`. |
+| 2 | Ping | TCP-ping; explicit port = single attempt; null port = 443→80 sequential, each full timeout; report successful latency. |
+| 3 | DNS | hickory-resolver; case-insensitive substring on canonical record string form. |
+| 4 | Response chart | uPlot, bundled. |
+| 5 | DEGRADED | Deferred; `degraded_count`=0. Bars are still uptime-graded (up/amber/down bands). |
+| 6 | Uptime source | Incidents (overlap-clipped). `/bars` & `/stats` uptime from incidents (live today); aggregate `uptime_pct` stored nightly for P4 reports. avg_ms 30d/90d = count-weighted from aggregates. |
+| 7 | Rollups | Completed days only; nightly + startup **catch-up** since last aggregate, bounded by retention; today computed live. Read endpoints call a bounded `ensure_aggregates`. |
+| 8 | Acknowledge | `acknowledged` column added in 0002; P2 = flag + UI only (re-notify suppression is P4). |
+| 9 | Keyword body | Read ≤2 MiB, lossy UTF-8, match within prefix. |
+| 10 | Series | Bucket window into ≤300 slots (avg ms + worst status). |
+| 11 | New Cause | `Keyword`. |
+| 12 | Detail tiles | Extended to 24h/7d/30d/90d. |
 
 ---
 
 ## 11. Build order
 
-1. Migration `0002` + **runner hardening** (comment-strip) + `models` new fields/FromRow/DTOs + validation helpers. (TDD: comment-strip, migration-on-P1-DB.)
-2. `Cause::Keyword`; `probe::run` dispatcher skeleton (http passthrough) + worker switch to `probe::run`.
-3. `probe::tcp` (port + ping) **(TDD, bound listener)**.
-4. `probe::dns` (hickory) **(TDD)**.
-5. Keyword mode in `probe::http` + keyword match helper **(TDD)**.
-6. `rollup::rollup_day` + nightly integration + `uptime` reuse **(TDD)**.
-7. API: stats 30d/90d + `series` + `bars` (lazy backfill) endpoints **(TDD)**.
-8. API: `incidents` list + acknowledge **(TDD)**; `incidents.acknowledged` already in schema.
-9. Frontend: `UptimeBar` (cards + panel) + `/bars` wiring.
+1. **Migration runner restructure** (version-ordered + comment-strip + real applied_at) + `0002_signal.sql` + `models` new fields/FromRow (Monitor + Incident) + DTO `type`/`url`-optional/new fields. **(TDD:** comment-strip, multi-version apply on fresh + v1 DB.)
+2. `Cause::Keyword`; `probe::run` dispatcher (http passthrough) + `worker` switch to `probe::run`; per-type API validation in create/update. **(TDD** validation.)
+3. `probe::tcp` (port + ping w/ fallback) **(TDD, bound listener).**
+4. `probe::dns` (hickory, injectable resolver for tests) **(TDD).**
+5. Keyword mode in `probe::http` (bounded body) + match helper **(TDD).**
+6. `rollup_day` + `rollup_catch_up` + `ensure_aggregates` + nightly/startup wiring **(TDD** overlap uptime, catch-up).
+7. API: stats 30d/90d (count-weighted avg) + `series` (bucketed) + `bars` (incidents+ensure) **(TDD).**
+8. API: `incidents` list + acknowledge **(TDD).**
+9. Frontend: `UptimeBar` (cards + panel, color bands, labels/legend) + `/bars`.
 10. Frontend: `ResponseChart` (uPlot) + incident-span shading.
-11. Frontend: `IncidentTimeline` (panel) + acknowledge.
+11. Frontend: `IncidentTimeline` (panel) + acknowledge; detail-panel tiles → 24h/7d/30d/90d.
 12. Frontend: `Incidents` screen + Rail nav.
-13. Frontend: `ListView` + grid⇄list toggle.
+13. Frontend: `ListView` + grid⇄list toggle + sort persistence.
 14. Frontend: `MonitorForm` type selector + type-specific fields; cards show real bar.
-15. Acceptance (one monitor per type + rollup/bars/series/incident) + final review.
+15. Acceptance (one monitor per type + rollup/bars/series/incident/ack; `0002` on real P1 DB) + final review.
+
+---
+
+## 12. Changelog — v2 (spec-review hardening)
+
+**Must-fix:** migration runner restructured to version-ordered (comment-strip alone couldn't apply 0002) — §3.1/§4/§11; `incidents.acknowledged` column added in 0002 (didn't exist) — §4/§7; `CreateMonitorDto` gains `type`, `url`→Optional, per-type validation replaces url-required — §5; rollup uptime uses overlap-based span query (not started-that-day) so midnight-spanning/open incidents count — §6. **Should-fix:** shared `ensure_aggregates` for /bars AND /stats — §6/§7; today never stored / computed live (no future-window miscount) — §6/§7; has_data/retention interaction defined — §7; keyword 2 MiB body cap + lossy UTF-8 — §5; count-weighted 30d/90d avg — §7; bounded read-path backfill + startup catch-up — §6; UptimeBar color bands defined — §8; series bucketing (≤300 slots) — §7; ping fallback semantics — §5. **Completeness (missed):** multi-day rollup catch-up since last aggregate — §6. **Optional:** aggregate uptime_pct kept for P4 (bars use incidents) — §6; detail tiles 24h/7d/30d/90d — §8; DNS canonical string forms — §5; list sort default+persistence — §8; incident-span shading source clipped to range — §8; bar end labels + legend — §8.
 
 *End of P2 design spec.*
