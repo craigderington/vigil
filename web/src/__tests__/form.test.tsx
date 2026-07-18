@@ -105,3 +105,37 @@ test("type selector: switching to ssl shows host+port fields and forces SSL togg
   expect(dto.type).toBe("ssl");
   expect(dto.ssl_check_enabled).toBe(true);
 });
+
+test("switching from https http to port after enabling SSL clears ssl_check_enabled (does not send a contradictory dto)", async () => {
+  const createMonitor = vi.fn(async (_dto: any) => ({ id: 5 }));
+  render(() => <MonitorForm api={{ createMonitor } as any} onSaved={()=>{}} onClose={()=>{}} />);
+
+  fireEvent.input(screen.getByLabelText("Name"), { target:{ value:"flip" }});
+  fireEvent.input(screen.getByLabelText("URL"), { target:{ value:"https://x" }});
+
+  const sslToggle = screen.getByLabelText(/enable ssl/i) as HTMLInputElement;
+  fireEvent.click(sslToggle);
+  expect(sslToggle.checked).toBe(true);
+
+  // now make SSL ineligible by switching type away from http-like
+  fireEvent.click(screen.getByRole("button", { name: "Port" }));
+
+  // the checkbox must not be stuck checked+disabled
+  const sslToggleAfter = screen.getByLabelText(/enable ssl/i) as HTMLInputElement;
+  expect(sslToggleAfter.checked).toBe(false);
+  // the alert-days editor must not still be visibly rendered under Port fields
+  expect(screen.queryByLabelText(/ssl alert days/i)).toBeNull();
+
+  const host = screen.getByLabelText("Host");
+  const port = screen.getByLabelText("Port");
+  fireEvent.input(host, { target:{ value:"db.internal" }});
+  fireEvent.input(port, { target:{ value:"5432" }});
+
+  fireEvent.click(screen.getByText(/create monitor/i));
+  await Promise.resolve();
+
+  expect(createMonitor).toHaveBeenCalled();
+  const dto = createMonitor.mock.calls[0][0];
+  expect(dto.type).toBe("port");
+  expect(dto.ssl_check_enabled).toBe(false);
+});

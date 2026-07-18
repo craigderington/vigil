@@ -1,4 +1,4 @@
-import { createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
 
 /**
  * Right-side Add/Edit monitor panel (Task 17). `api` is injected as a prop
@@ -120,6 +120,17 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   );
 
   const sslAllowed = () => (isHttpLike() && url().startsWith("https://")) || type() === "ssl";
+
+  // Defense-in-depth #2: if the monitor config drifts to SSL-ineligible
+  // (type switched away from http/keyword/ssl, or the URL moved off
+  // https://) while the toggle is still on, clear it so the checkbox
+  // doesn't strand itself checked+disabled and the alert-days editor
+  // doesn't linger under now-irrelevant fields. No-op for type==="ssl"
+  // since sslAllowed() is always true there — doesn't fight the
+  // forced-on rendering below.
+  createEffect(() => {
+    if (!sslAllowed() && sslCheckEnabled()) setSslCheckEnabled(false);
+  });
 
   const [intervalSeconds, setIntervalSeconds] = createSignal<number>(
     props.monitor?.interval_seconds ?? 300,
@@ -282,7 +293,10 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
     }
 
     // Certificate & Domain (§6) — always sent so edits can turn them off.
-    dto.ssl_check_enabled = t === "ssl" ? true : sslCheckEnabled();
+    // Clamped (not just read from the signal) so a stale/contradictory
+    // ssl_check_enabled can never reach the backend even if the UI-clearing
+    // effect above hasn't run yet for some reason.
+    dto.ssl_check_enabled = t === "ssl" ? true : sslAllowed() && sslCheckEnabled();
     dto.ssl_alert_days = textToDaysJson(sslAlertDays());
     dto.domain_check_enabled = domainCheckEnabled();
     dto.domain_alert_days = textToDaysJson(domainAlertDays());
