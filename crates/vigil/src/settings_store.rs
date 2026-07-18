@@ -7,6 +7,10 @@ use sqlx::SqlitePool;
 const DEFAULT_COOLDOWN_MINUTES: i64 = 15;
 const DEFAULT_RETENTION_DAYS: i64 = 30;
 const DEFAULT_ANCHORS: &str = "1.1.1.1:443,8.8.8.8:443";
+const DEFAULT_CERT_SSL_INTERVAL_SECONDS: i64 = 43_200; // 12h
+const DEFAULT_CERT_DOMAIN_INTERVAL_SECONDS: i64 = 86_400; // 24h
+const DEFAULT_CERT_TICK_SECONDS: i64 = 60;
+const DEFAULT_CERT_CONCURRENCY: i64 = 5;
 
 /// Reads `key`, returning `default` if the row is absent.
 pub async fn get(pool: &SqlitePool, key: &str, default: &str) -> String {
@@ -60,4 +64,42 @@ pub async fn anchors(pool: &SqlitePool) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// `cert.ssl_interval_seconds` — how often `cert_scheduler` re-checks a
+/// monitor's TLS certificate. Default 43200 (12h) — deliberately decoupled
+/// from the monitor's fast uptime `interval_seconds` (§4 of the spec).
+pub async fn cert_ssl_interval_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "cert.ssl_interval_seconds", &DEFAULT_CERT_SSL_INTERVAL_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_CERT_SSL_INTERVAL_SECONDS)
+}
+
+/// `cert.domain_interval_seconds` — how often `cert_scheduler` re-checks a
+/// monitor's domain registration expiry. Default 86400 (24h) — RDAP/WHOIS
+/// registries dislike frequent queries (§6 of the spec).
+pub async fn cert_domain_interval_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "cert.domain_interval_seconds", &DEFAULT_CERT_DOMAIN_INTERVAL_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_CERT_DOMAIN_INTERVAL_SECONDS)
+}
+
+/// `cert.tick_seconds` — how often `cert_scheduler::run`'s loop wakes to
+/// re-select due monitors. Default 60.
+pub async fn cert_tick_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "cert.tick_seconds", &DEFAULT_CERT_TICK_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_CERT_TICK_SECONDS)
+}
+
+/// `cert.concurrency` — the size of the semaphore bounding simultaneous
+/// SSL/domain refreshes. Default 5.
+pub async fn cert_concurrency(pool: &SqlitePool) -> i64 {
+    get(pool, "cert.concurrency", &DEFAULT_CERT_CONCURRENCY.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_CERT_CONCURRENCY)
 }
