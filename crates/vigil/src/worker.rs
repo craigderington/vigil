@@ -52,7 +52,7 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
         return;
     }
 
-    let out = probe::http::probe(&m).await;
+    let out = probe::run(&m).await;
     let now = now();
 
     let status = if out.ok { "up" } else { "down" };

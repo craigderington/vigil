@@ -26,6 +26,68 @@ fn not_found() -> (StatusCode, String) {
     (StatusCode::NOT_FOUND, "monitor not found".to_string())
 }
 
+/// Per-type required-field validation (spec §5). `r#type` picks which
+/// fields are mandatory; everything else is an already-merged candidate
+/// value (DTO override applied over the existing row, for `update`). The
+/// interval-floor check is separate and unconditional, so it isn't covered
+/// here. Returns `Err(message)` suitable for a 422 response.
+fn validate_monitor_dto(
+    r#type: &str,
+    url: &Option<String>,
+    host: &Option<String>,
+    port: &Option<i64>,
+    keyword: &Option<String>,
+    keyword_mode: &Option<String>,
+    dns_record_type: &Option<String>,
+) -> Result<(), String> {
+    fn blank(s: &Option<String>) -> bool {
+        s.as_deref().map(str::trim).unwrap_or("").is_empty()
+    }
+
+    match r#type {
+        "keyword" => {
+            if blank(url) {
+                return Err("url is required".to_string());
+            }
+            if blank(keyword) {
+                return Err("keyword is required".to_string());
+            }
+            if blank(keyword_mode) {
+                return Err("keyword_mode is required".to_string());
+            }
+        }
+        "port" => {
+            if blank(host) {
+                return Err("host is required".to_string());
+            }
+            if port.is_none() {
+                return Err("port is required".to_string());
+            }
+        }
+        "ping" => {
+            if blank(host) {
+                return Err("host is required".to_string());
+            }
+        }
+        "dns" => {
+            if blank(host) {
+                return Err("host is required".to_string());
+            }
+            if blank(dns_record_type) {
+                return Err("dns_record_type is required".to_string());
+            }
+        }
+        // "http" and anything else (ssl-only, future types) default to the
+        // original P1 behavior: a url is required.
+        _ => {
+            if blank(url) {
+                return Err("url is required".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn list(State(state): State<AppState>) -> ApiResult<Vec<Monitor>> {
     let rows = sqlx::query_as::<_, Monitor>("SELECT * FROM monitors ORDER BY sort_order, id")
         .fetch_all(&state.db)
@@ -43,10 +105,16 @@ pub async fn create(
     State(state): State<AppState>,
     Json(dto): Json<CreateMonitorDto>,
 ) -> ApiResult<Monitor> {
-    // Per-type validation lands in Task 2; for now, preserve P1's "url
-    // required" behavior (every monitor created today is effectively http).
-    if dto.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        return Err((StatusCode::UNPROCESSABLE_ENTITY, "url is required".to_string()));
+    if let Err(msg) = validate_monitor_dto(
+        &dto.r#type,
+        &dto.url,
+        &dto.host,
+        &dto.port,
+        &dto.keyword,
+        &dto.keyword_mode,
+        &dto.dns_record_type,
+    ) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
     if dto.interval_seconds < 15 {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "interval must be >= 15s".to_string()));
@@ -109,12 +177,6 @@ pub async fn update(
             return Err((StatusCode::UNPROCESSABLE_ENTITY, "interval must be >= 15s".to_string()));
         }
     }
-    if let Some(url) = &dto.url {
-        if url.trim().is_empty() {
-            return Err((StatusCode::UNPROCESSABLE_ENTITY, "url is required".to_string()));
-        }
-    }
-
     let name = dto.name.unwrap_or(existing.name);
     let url = dto.url.or(existing.url);
     let method = dto.method.unwrap_or(existing.method);
@@ -139,6 +201,18 @@ pub async fn update(
     let keyword_case_sensitive = dto.keyword_case_sensitive.unwrap_or(existing.keyword_case_sensitive);
     let dns_record_type = dto.dns_record_type.or(existing.dns_record_type);
     let dns_expected_value = dto.dns_expected_value.or(existing.dns_expected_value);
+
+    if let Err(msg) = validate_monitor_dto(
+        &existing.r#type,
+        &url,
+        &host,
+        &port,
+        &keyword,
+        &keyword_mode,
+        &dns_record_type,
+    ) {
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, msg));
+    }
 
     let ts = now();
     sqlx::query(
@@ -224,6 +298,7 @@ pub async fn check_now(State(state): State<AppState>, Path(id): Path<i64>) -> Ap
 pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome> {
     let mut m = crate::models::test_defaults_monitor();
     m.name = dto.name;
+    m.r#type = dto.r#type;
     m.url = dto.url;
     m.method = dto.method;
     m.headers = dto.headers;
@@ -234,8 +309,15 @@ pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome>
     m.timeout_seconds = dto.timeout_seconds;
     m.follow_redirects = dto.follow_redirects;
     m.verify_ssl = dto.verify_ssl;
+    m.host = dto.host;
+    m.port = dto.port;
+    m.keyword = dto.keyword;
+    m.keyword_mode = dto.keyword_mode;
+    m.keyword_case_sensitive = dto.keyword_case_sensitive;
+    m.dns_record_type = dto.dns_record_type;
+    m.dns_expected_value = dto.dns_expected_value;
 
-    let out = probe::http::probe(&m).await;
+    let out = probe::run(&m).await;
     Json(out)
 }
 

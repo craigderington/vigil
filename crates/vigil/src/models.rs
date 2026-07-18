@@ -38,6 +38,7 @@ pub enum Cause {
     Status,
     Connection,
     Dns,
+    Keyword,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
