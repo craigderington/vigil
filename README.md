@@ -15,15 +15,15 @@ chmod 0644 secrets/smtp_password
 docker compose up -d
 ```
 
-Vigil is now running at <http://localhost:8080>. The container listens on
-port 8080 internally regardless of the host port you publish it on.
+Vigil is now running at <http://localhost:8099>. The container listens on
+port 8090 internally regardless of the host port you publish it on.
 
 Optionally copy `.env.example` to `.env` to override defaults. `docker
 compose` forwards each of these into the container's environment:
 
-- `VIGIL_HOST_PORT` — the published **host** port (default `8080`).
+- `VIGIL_HOST_PORT` — the published **host** port (default `8099`).
 - `VIGIL_BIND` — the container-**internal** bind address (default
-  `0.0.0.0:8080`). If you change its PORT, the container's Docker
+  `0.0.0.0:8090`). If you change its PORT, the container's Docker
   healthcheck derives its probe port from this same value, so it stays in
   sync automatically.
 - `VIGIL_MAX_CONCURRENCY` — global cap on simultaneous probes in flight
@@ -31,15 +31,15 @@ compose` forwards each of these into the container's environment:
 
 ### Changing the published host port
 
-If port 8080 is already taken on your host, set `VIGIL_HOST_PORT` (defaults
-to `8080`) rather than editing `docker-compose.yml`:
+If port 8099 is already taken on your host, set `VIGIL_HOST_PORT` (defaults
+to `8099`) rather than editing `docker-compose.yml`:
 
 ```bash
-VIGIL_HOST_PORT=18080 docker compose up -d
+VIGIL_HOST_PORT=18099 docker compose up -d
 ```
 
-or put `VIGIL_HOST_PORT=18080` in `.env`. The container's internal port is
-always 8080 — only the host-side mapping changes.
+or put `VIGIL_HOST_PORT=18099` in `.env`. The container's internal port is
+always 8090 — only the host-side mapping changes.
 
 ## Data & backups
 
@@ -75,7 +75,7 @@ will not notice an in-place edit to the secret file without a redeploy.
 
 ## Security posture
 
-Vigil binds `0.0.0.0:8080` inside the container (i.e. it's reachable from
+Vigil binds `0.0.0.0:8090` inside the container (i.e. it's reachable from
 your LAN if you publish the port on a non-loopback host interface) and has
 **no built-in authentication**. It is designed as a trusted-network,
 single-operator tool — put it behind a reverse proxy, VPN, or firewall rule

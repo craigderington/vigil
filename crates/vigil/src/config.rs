@@ -1,8 +1,8 @@
 //! Runtime configuration, loaded from environment variables with
 //! Global-Constraints defaults (see docs/superpowers/plans/2026-07-17-vigil-p1-mvp.md).
 
-/// Default bind address: `0.0.0.0:8080`.
-pub const DEFAULT_BIND: &str = "0.0.0.0:8080";
+/// Default bind address: `0.0.0.0:8090`.
+pub const DEFAULT_BIND: &str = "0.0.0.0:8090";
 /// Default SQLite database path inside the container's `/data` volume.
 pub const DEFAULT_DB_PATH: &str = "/data/vigil.db";
 /// Default global probe-concurrency cap.
@@ -29,7 +29,7 @@ impl Config {
     /// Build a `Config` from environment variables, falling back to defaults
     /// for anything unset or unparsable.
     ///
-    /// - `VIGIL_BIND` (default `0.0.0.0:8080`)
+    /// - `VIGIL_BIND` (default `0.0.0.0:8090`)
     /// - `VIGIL_DB` (default `/data/vigil.db`)
     /// - `VIGIL_MAX_CONCURRENCY` (default `25`)
     pub fn from_env() -> Self {
@@ -55,7 +55,7 @@ mod tests {
     #[test]
     fn defaults_match_global_constraints() {
         let cfg = Config::default();
-        assert_eq!(cfg.bind, "0.0.0.0:8080");
+        assert_eq!(cfg.bind, "0.0.0.0:8090");
         assert_eq!(cfg.db_path, "/data/vigil.db");
         assert_eq!(cfg.max_concurrency, 25);
     }
