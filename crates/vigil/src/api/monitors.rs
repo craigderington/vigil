@@ -473,14 +473,17 @@ pub async fn stats(
 
         // Today's aggregate row doesn't exist yet (`ensure_aggregates` never
         // rolls up the current day), so blend in today's raw checks as one
-        // more weighted term.
-        let last24_start = ts - 86400;
+        // more weighted term. Bound to today's UTC calendar day only (not a
+        // rolling last-24h window) — a rolling window re-includes the tail
+        // of yesterday's checks, which are already baked into yesterday's
+        // aggregate row, double-counting them.
+        let today_start = crate::rollup::day_bounds(&crate::rollup::day_str(ts)).0;
         let (raw_sum, raw_n): (Option<f64>, Option<f64>) = sqlx::query_as(
             "SELECT CAST(SUM(response_time_ms) AS REAL), CAST(COUNT(response_time_ms) AS REAL) \
              FROM checks WHERE monitor_id = ? AND checked_at >= ? AND response_time_ms IS NOT NULL",
         )
         .bind(id)
-        .bind(last24_start)
+        .bind(today_start)
         .fetch_one(&state.db)
         .await
         .map_err(db_err)?;

@@ -102,6 +102,59 @@ async fn stats_90d_avg_ms_is_numeric() {
 }
 
 #[tokio::test]
+async fn stats_30d_avg_ms_is_count_weighted_no_double_count() {
+    let env = test_state().await;
+    let a = serve(env.state.clone()).await;
+    let c = reqwest::Client::new();
+    // create a monitor
+    let created: serde_json::Value = c
+        .post(format!("http://{a}/api/monitors"))
+        .json(&serde_json::json!({"name":"x","url":"https://e.com"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_i64().unwrap();
+    // yesterday: a durable aggregate row avg=100, sample=10 (NO raw checks for
+    // yesterday, so ensure_aggregates won't overwrite it)
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let yday = vigil::rollup::day_str(now - 86400);
+    sqlx::query(
+        "INSERT INTO check_aggregates_daily (monitor_id,day,up_count,down_count,degraded_count,avg_response_ms,min_response_ms,max_response_ms,uptime_pct,incident_count,sample_count) VALUES (?,?,10,0,0,100.0,100,100,100.0,0,10)",
+    )
+    .bind(id)
+    .bind(&yday)
+    .execute(&env.state.db)
+    .await
+    .unwrap();
+    // today: 2 raw checks at 200ms each
+    let today_start = vigil::rollup::day_bounds(&vigil::rollup::day_str(now)).0;
+    for t in [today_start + 10, today_start + 20] {
+        sqlx::query(
+            "INSERT INTO checks (monitor_id,checked_at,status,response_time_ms) VALUES (?,?,'up',200)",
+        )
+        .bind(id)
+        .bind(t)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    }
+    let s: serde_json::Value = c
+        .get(format!("http://{a}/api/monitors/{id}/stats?range=30d"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let avg = s["avg_ms"].as_f64().unwrap();
+    // count-weighted: (100*10 + 200*2)/(10+2) = 1400/12 = 116.666...
+    assert!((avg - 116.666).abs() < 0.5, "expected ~116.67 count-weighted (no double-count), got {avg}");
+}
+
+#[tokio::test]
 async fn series_24h_returns_bucketed_points() {
     let env = test_state().await;
     let a = serve(env.state.clone()).await;
