@@ -122,7 +122,7 @@ export function setMonitorNotifications(
   }).then((r) => json(r));
 }
 
-export type StatsRange = "24h" | "7d";
+export type StatsRange = "24h" | "7d" | "30d" | "90d";
 
 export interface Stats {
   uptime_pct: number | null;
@@ -182,4 +182,9 @@ export function getIncidents(range?: string, monitorId?: number): Promise<Incide
   if (range) params.set("range", range);
   const qs = params.toString();
   return fetch(`/api/incidents${qs ? `?${qs}` : ""}`).then((r) => json(r));
+}
+
+/** Silences re-notifications on an ongoing incident without resolving it. */
+export function acknowledgeIncident(id: number): Promise<{ ok: boolean }> {
+  return fetch(`/api/incidents/${id}/acknowledge`, { method: "POST" }).then((r) => json(r));
 }

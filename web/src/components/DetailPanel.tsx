@@ -1,5 +1,7 @@
 import { createResource, createSignal, onCleanup, onMount, Show, type Component } from "solid-js";
 import * as api from "../api";
+import type { StatsRange } from "../api";
+import IncidentTimeline from "./IncidentTimeline";
 import ResponseChart from "./ResponseChart";
 import UptimeBar from "./UptimeBar";
 
@@ -72,7 +74,7 @@ function absoluteFrom(epochSeconds: number | null | undefined): string | undefin
 const UptimeTile: Component<{
   label: string;
   monitorId: number;
-  range: "24h" | "7d";
+  range: StatsRange;
   nullText: string;
 }> = (props) => {
   const [stats] = createResource(
@@ -233,6 +235,8 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
           <div class="uptime-tiles">
             <UptimeTile label="24h" monitorId={props.monitor.id} range="24h" nullText="— · 24h" />
             <UptimeTile label="7d" monitorId={props.monitor.id} range="7d" nullText="— · 7d" />
+            <UptimeTile label="30d" monitorId={props.monitor.id} range="30d" nullText="— · 30d" />
+            <UptimeTile label="90d" monitorId={props.monitor.id} range="90d" nullText="— · 90d" />
           </div>
 
           <ResponseChart monitorId={props.monitor.id} />
@@ -241,6 +245,8 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
             <h3 class="detail-section-h">90-day uptime</h3>
             <UptimeBar monitorId={props.monitor.id} days={90} />
           </section>
+
+          <IncidentTimeline monitorId={props.monitor.id} />
 
           <details class="detail-config">
             <summary>Configuration</summary>
