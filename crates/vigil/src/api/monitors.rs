@@ -31,6 +31,13 @@ fn not_found() -> (StatusCode, String) {
 /// value (DTO override applied over the existing row, for `update`). The
 /// interval-floor check is separate and unconditional, so it isn't covered
 /// here. Returns `Err(message)` suitable for a 422 response.
+///
+/// `ssl_check_enabled` (P3 §6): the SSL add-on only makes sense where a TLS
+/// handshake target exists — `http`/`keyword` monitors with an `https://`
+/// url, or the dedicated `ssl` type (which requires `host`). Allowing it on
+/// `port`/`ping`/`dns` would let the cert scheduler select a monitor with no
+/// TLS target, producing a false "errored" cert row, so it's rejected here.
+#[allow(clippy::too_many_arguments)]
 fn validate_monitor_dto(
     r#type: &str,
     url: &Option<String>,
@@ -39,6 +46,7 @@ fn validate_monitor_dto(
     keyword: &Option<String>,
     keyword_mode: &Option<String>,
     dns_record_type: &Option<String>,
+    ssl_check_enabled: bool,
 ) -> Result<(), String> {
     fn blank(s: &Option<String>) -> bool {
         s.as_deref().map(str::trim).unwrap_or("").is_empty()
@@ -77,11 +85,33 @@ fn validate_monitor_dto(
                 return Err("dns_record_type is required".to_string());
             }
         }
-        // "http" and anything else (ssl-only, future types) default to the
-        // original P1 behavior: a url is required.
+        "ssl" => {
+            if blank(host) {
+                return Err("host is required".to_string());
+            }
+        }
+        // "http" and anything else default to the original P1 behavior: a
+        // url is required.
         _ => {
             if blank(url) {
                 return Err("url is required".to_string());
+            }
+        }
+    }
+
+    if ssl_check_enabled {
+        match r#type {
+            "http" | "keyword" => {
+                if !url.as_deref().unwrap_or("").starts_with("https://") {
+                    return Err("ssl_check_enabled requires an https:// url".to_string());
+                }
+            }
+            "ssl" => {} // host already required above
+            _ => {
+                return Err(
+                    "ssl_check_enabled is only supported on http/keyword (https://) or ssl monitors"
+                        .to_string(),
+                );
             }
         }
     }
@@ -113,6 +143,7 @@ pub async fn create(
         &dto.keyword,
         &dto.keyword_mode,
         &dto.dns_record_type,
+        dto.ssl_check_enabled,
     ) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
@@ -126,8 +157,9 @@ pub async fn create(
          expected_status_codes, interval_seconds, timeout_seconds, follow_redirects, verify_ssl, \
          confirmation_threshold, recovery_threshold, retry_interval_seconds, \
          host, port, keyword, keyword_mode, keyword_case_sensitive, dns_record_type, dns_expected_value, \
+         ssl_check_enabled, ssl_alert_days, domain_check_enabled, domain_alert_days, \
          status, is_paused, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?) \
          RETURNING id",
     )
     .bind(&dto.name)
@@ -153,6 +185,10 @@ pub async fn create(
     .bind(dto.keyword_case_sensitive)
     .bind(&dto.dns_record_type)
     .bind(&dto.dns_expected_value)
+    .bind(dto.ssl_check_enabled)
+    .bind(&dto.ssl_alert_days)
+    .bind(dto.domain_check_enabled)
+    .bind(&dto.domain_alert_days)
     .bind(ts)
     .bind(ts)
     .fetch_one(&state.db)
@@ -201,6 +237,10 @@ pub async fn update(
     let keyword_case_sensitive = dto.keyword_case_sensitive.unwrap_or(existing.keyword_case_sensitive);
     let dns_record_type = dto.dns_record_type.or(existing.dns_record_type);
     let dns_expected_value = dto.dns_expected_value.or(existing.dns_expected_value);
+    let ssl_check_enabled = dto.ssl_check_enabled.unwrap_or(existing.ssl_check_enabled);
+    let ssl_alert_days = dto.ssl_alert_days.unwrap_or(existing.ssl_alert_days);
+    let domain_check_enabled = dto.domain_check_enabled.unwrap_or(existing.domain_check_enabled);
+    let domain_alert_days = dto.domain_alert_days.unwrap_or(existing.domain_alert_days);
 
     if let Err(msg) = validate_monitor_dto(
         &existing.r#type,
@@ -210,6 +250,7 @@ pub async fn update(
         &keyword,
         &keyword_mode,
         &dns_record_type,
+        ssl_check_enabled,
     ) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
@@ -220,7 +261,8 @@ pub async fn update(
          expected_status_codes=?, interval_seconds=?, timeout_seconds=?, follow_redirects=?, \
          verify_ssl=?, confirmation_threshold=?, recovery_threshold=?, retry_interval_seconds=?, \
          host=?, port=?, keyword=?, keyword_mode=?, keyword_case_sensitive=?, dns_record_type=?, \
-         dns_expected_value=?, updated_at=? WHERE id=?",
+         dns_expected_value=?, ssl_check_enabled=?, ssl_alert_days=?, domain_check_enabled=?, \
+         domain_alert_days=?, updated_at=? WHERE id=?",
     )
     .bind(&name)
     .bind(&url)
@@ -244,6 +286,10 @@ pub async fn update(
     .bind(keyword_case_sensitive)
     .bind(&dns_record_type)
     .bind(&dns_expected_value)
+    .bind(ssl_check_enabled)
+    .bind(&ssl_alert_days)
+    .bind(domain_check_enabled)
+    .bind(&domain_alert_days)
     .bind(ts)
     .bind(id)
     .execute(&state.db)
@@ -316,6 +362,10 @@ pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome>
     m.keyword_case_sensitive = dto.keyword_case_sensitive;
     m.dns_record_type = dto.dns_record_type;
     m.dns_expected_value = dto.dns_expected_value;
+    m.ssl_check_enabled = dto.ssl_check_enabled;
+    m.ssl_alert_days = dto.ssl_alert_days;
+    m.domain_check_enabled = dto.domain_check_enabled;
+    m.domain_alert_days = dto.domain_alert_days;
 
     let out = probe::run(&m).await;
     Json(out)

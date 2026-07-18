@@ -39,6 +39,7 @@ pub enum Cause {
     Connection,
     Dns,
     Keyword,
+    Ssl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +93,10 @@ pub struct Monitor {
     pub keyword_case_sensitive: bool,
     pub dns_record_type: Option<String>,
     pub dns_expected_value: Option<String>,
+    pub ssl_check_enabled: bool,
+    pub ssl_alert_days: String,
+    pub domain_check_enabled: bool,
+    pub domain_alert_days: String,
     pub status: Status,
     pub is_paused: bool,
     pub last_checked_at: Option<Ts>,
@@ -112,6 +117,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Monitor {
         let verify_ssl_raw: i64 = row.try_get("verify_ssl")?;
         let is_paused_raw: i64 = row.try_get("is_paused")?;
         let keyword_case_sensitive_raw: i64 = row.try_get("keyword_case_sensitive")?;
+        let ssl_check_enabled_raw: i64 = row.try_get("ssl_check_enabled")?;
+        let domain_check_enabled_raw: i64 = row.try_get("domain_check_enabled")?;
         Ok(Monitor {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
@@ -137,6 +144,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Monitor {
             keyword_case_sensitive: keyword_case_sensitive_raw != 0,
             dns_record_type: row.try_get("dns_record_type")?,
             dns_expected_value: row.try_get("dns_expected_value")?,
+            ssl_check_enabled: ssl_check_enabled_raw != 0,
+            ssl_alert_days: row.try_get("ssl_alert_days")?,
+            domain_check_enabled: domain_check_enabled_raw != 0,
+            domain_alert_days: row.try_get("domain_alert_days")?,
             status: Status::from_db(&status_raw),
             is_paused: is_paused_raw != 0,
             last_checked_at: row.try_get("last_checked_at")?,
@@ -182,6 +193,84 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for Incident {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SslCert {
+    pub monitor_id: i64,
+    pub issuer: Option<String>,
+    pub subject: Option<String>,
+    pub valid_from: Option<i64>,
+    pub valid_until: Option<i64>,
+    pub days_remaining: Option<i64>,
+    pub is_valid: Option<bool>,
+    pub chain_ok: Option<bool>,
+    pub hostname_match: Option<bool>,
+    pub self_signed: Option<bool>,
+    pub error: Option<String>,
+    pub alerted_days: Option<i64>,
+    pub invalid_alerted: bool,
+    pub last_checked: Option<i64>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for SslCert {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        let is_valid_raw: Option<i64> = row.try_get("is_valid")?;
+        let chain_ok_raw: Option<i64> = row.try_get("chain_ok")?;
+        let hostname_match_raw: Option<i64> = row.try_get("hostname_match")?;
+        let self_signed_raw: Option<i64> = row.try_get("self_signed")?;
+        let invalid_alerted_raw: i64 = row.try_get("invalid_alerted")?;
+        Ok(SslCert {
+            monitor_id: row.try_get("monitor_id")?,
+            issuer: row.try_get("issuer")?,
+            subject: row.try_get("subject")?,
+            valid_from: row.try_get("valid_from")?,
+            valid_until: row.try_get("valid_until")?,
+            days_remaining: row.try_get("days_remaining")?,
+            is_valid: is_valid_raw.map(|v| v != 0),
+            chain_ok: chain_ok_raw.map(|v| v != 0),
+            hostname_match: hostname_match_raw.map(|v| v != 0),
+            self_signed: self_signed_raw.map(|v| v != 0),
+            error: row.try_get("error")?,
+            alerted_days: row.try_get("alerted_days")?,
+            invalid_alerted: invalid_alerted_raw != 0,
+            last_checked: row.try_get("last_checked")?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DomainInfo {
+    pub monitor_id: i64,
+    pub registrar: Option<String>,
+    pub expiry_date: Option<i64>,
+    pub days_remaining: Option<i64>,
+    pub name_servers: Option<String>,
+    pub status_codes: Option<String>,
+    pub queryable: Option<bool>,
+    pub source: Option<String>,
+    pub alerted_days: Option<i64>,
+    pub last_checked: Option<i64>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for DomainInfo {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
+        use sqlx::Row;
+        let queryable_raw: Option<i64> = row.try_get("queryable")?;
+        Ok(DomainInfo {
+            monitor_id: row.try_get("monitor_id")?,
+            registrar: row.try_get("registrar")?,
+            expiry_date: row.try_get("expiry_date")?,
+            days_remaining: row.try_get("days_remaining")?,
+            name_servers: row.try_get("name_servers")?,
+            status_codes: row.try_get("status_codes")?,
+            queryable: queryable_raw.map(|v| v != 0),
+            source: row.try_get("source")?,
+            alerted_days: row.try_get("alerted_days")?,
+            last_checked: row.try_get("last_checked")?,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Connectivity {
     Online,
@@ -216,6 +305,12 @@ fn d_retry() -> i64 {
 }
 fn d_http() -> String {
     "http".to_string()
+}
+fn d_ssl_alert_days() -> String {
+    "[30,14,7,3,1]".to_string()
+}
+fn d_domain_alert_days() -> String {
+    "[45,30,14,7]".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -254,6 +349,14 @@ pub struct CreateMonitorDto {
     pub keyword_case_sensitive: bool,
     pub dns_record_type: Option<String>,
     pub dns_expected_value: Option<String>,
+    #[serde(default)]
+    pub ssl_check_enabled: bool,
+    #[serde(default = "d_ssl_alert_days")]
+    pub ssl_alert_days: String,
+    #[serde(default)]
+    pub domain_check_enabled: bool,
+    #[serde(default = "d_domain_alert_days")]
+    pub domain_alert_days: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -280,6 +383,10 @@ pub struct UpdateMonitorDto {
     pub keyword_case_sensitive: Option<bool>,
     pub dns_record_type: Option<String>,
     pub dns_expected_value: Option<String>,
+    pub ssl_check_enabled: Option<bool>,
+    pub ssl_alert_days: Option<String>,
+    pub domain_check_enabled: Option<bool>,
+    pub domain_alert_days: Option<String>,
 }
 
 /// Fully-defaulted http Monitor fixture for tests in later tasks.
@@ -309,6 +416,10 @@ pub fn test_defaults_monitor() -> Monitor {
         keyword_case_sensitive: false,
         dns_record_type: None,
         dns_expected_value: None,
+        ssl_check_enabled: false,
+        ssl_alert_days: "[30,14,7,3,1]".to_string(),
+        domain_check_enabled: false,
+        domain_alert_days: "[45,30,14,7]".to_string(),
         status: Status::Pending,
         is_paused: false,
         last_checked_at: None,

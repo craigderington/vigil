@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
     (2, include_str!("../migrations/0002_signal.sql")),
+    (3, include_str!("../migrations/0003_certs.sql")),
 ];
 
 pub async fn connect(db_path: &str) -> anyhow::Result<sqlx::SqlitePool> {

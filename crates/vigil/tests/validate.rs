@@ -92,6 +92,22 @@ async fn test_check_dispatches_through_probe_run_for_http() {
     assert_eq!(out["ok"], serde_json::Value::Bool(true), "expected ok:true, got {out}");
 }
 
+/// P3 Task 1: `ssl_check_enabled` may be true only on `http`/`keyword`
+/// (with an `https://` url) or `ssl`-type monitors — on `port`/`ping`/`dns`
+/// it's a 422 so such a monitor never gets selected by the cert scheduler.
+#[tokio::test]
+async fn ssl_check_enabled_on_port_type_is_422() {
+    let env = test_state().await;
+    let a = serve(env.state.clone()).await;
+    let r = reqwest::Client::new()
+        .post(format!("http://{a}/api/monitors"))
+        .json(&serde_json::json!({"name":"p","type":"port","host":"h","port":80,"ssl_check_enabled":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 422);
+}
+
 /// Task 3: the `tcp` prober is now real. Proves `/test-check` dispatches
 /// `port` monitors through `probe::run` into `probe::tcp::probe` (not just
 /// the `http` arm exercised above) by connecting to a bound loopback

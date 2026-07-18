@@ -94,6 +94,7 @@ pub async fn apply_result(state: &AppState, m: &Monitor, out: &ProbeOutcome) -> 
                 Some(Cause::Connection) => "connection",
                 Some(Cause::Dns) => "dns",
                 Some(Cause::Keyword) => "keyword",
+                Some(Cause::Ssl) => "ssl",
                 None => "connection",
             };
             let id: i64 = sqlx::query_scalar(
