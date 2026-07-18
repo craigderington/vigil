@@ -44,6 +44,7 @@ const App: Component = () => {
   const editMonitor = (monitor: any) => {
     setFormMonitor(monitor);
     setFormOpen(true);
+    setOpenMonitorId(null);
   };
   const closeForm = () => setFormOpen(false);
   const onFormSaved = () => {

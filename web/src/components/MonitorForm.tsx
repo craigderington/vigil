@@ -103,27 +103,31 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
 
   onMount(() => {
     (async () => {
-      const list = await props.api.getChannels?.();
-      if (!list) return;
-      const emailChannels = list.filter((c: any) => c.type === "email");
-      setChannels(emailChannels);
+      try {
+        const list = await props.api.getChannels?.();
+        if (!list) return;
+        const emailChannels = list.filter((c: any) => c.type === "email");
+        setChannels(emailChannels);
 
-      const initial: Record<number, NotifRow> = {};
-      for (const c of emailChannels) {
-        initial[c.id] = { attached: false, down: true, recovered: true };
-      }
-
-      if (props.monitor?.id != null) {
-        const existing = await props.api.getMonitorNotifications?.(props.monitor.id);
-        for (const item of existing ?? []) {
-          initial[item.channel_id] = {
-            attached: true,
-            down: item.triggers.includes("down"),
-            recovered: item.triggers.includes("recovered"),
-          };
+        const initial: Record<number, NotifRow> = {};
+        for (const c of emailChannels) {
+          initial[c.id] = { attached: false, down: true, recovered: true };
         }
+
+        if (props.monitor?.id != null) {
+          const existing = await props.api.getMonitorNotifications?.(props.monitor.id);
+          for (const item of existing ?? []) {
+            initial[item.channel_id] = {
+              attached: true,
+              down: item.triggers.includes("down"),
+              recovered: item.triggers.includes("recovered"),
+            };
+          }
+        }
+        setNotifState(initial);
+      } catch (e) {
+        console.warn("MonitorForm: failed to load notification channels", e);
       }
-      setNotifState(initial);
     })();
   });
 
@@ -178,13 +182,13 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
       auth_type: authType() === "none" ? null : authType(),
       auth_ref: authRef,
       expected_status_codes: expectedCodes(),
-      interval_seconds: intervalSeconds(),
-      timeout_seconds: timeoutSeconds(),
+      interval_seconds: Math.max(15, intervalSeconds()),
+      timeout_seconds: Math.max(1, timeoutSeconds()),
       follow_redirects: followRedirects(),
       verify_ssl: verifySsl(),
-      confirmation_threshold: confirmationThreshold(),
-      recovery_threshold: recoveryThreshold(),
-      retry_interval_seconds: retryInterval(),
+      confirmation_threshold: Math.max(1, confirmationThreshold()),
+      recovery_threshold: Math.max(1, recoveryThreshold()),
+      retry_interval_seconds: Math.max(1, retryInterval()),
     };
   }
 
@@ -289,7 +293,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
                 type="number"
                 min={15}
                 value={intervalSeconds()}
-                onInput={(e) => setIntervalSeconds(Number(e.currentTarget.value) || 15)}
+                onInput={(e) => setIntervalSeconds(Math.max(15, Number(e.currentTarget.value) || 15))}
               />
             </div>
             <div class="form-field">
