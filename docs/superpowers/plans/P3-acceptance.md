@@ -45,8 +45,10 @@ surfaced this; the unit tests couldn't (no live registrar call). Fix: send an id
 | Live SSL cert captured (SNI correct) | ✅ | `ssl` monitor → `refresh-ssl` → `GET /ssl`: issuer `SSL.com`, subject `cloudflare-dns.com` (SNI worked), `is_valid=true`, `chain_ok=true`, `hostname_match=true`, `self_signed=false`, `days_remaining=156`, no error — chain & hostname independently true (Task-3 decoupling) |
 | Live domain expiry (RDAP) | ✅ (after UA fix) | `domain_check_enabled` monitor → `refresh-domain` → `GET /domain`: registrar `Cloudflare, Inc.`, `queryable=true`, `source=rdap`, `days_remaining=2406`, nameservers populated |
 | Webhook channel delivery | ✅ | `webhook_payload_shape` unit test asserts the JSON body carries the monitor name; the final review cross-checked every channel-type config field name against the backend senders (`notify/http.rs`) |
-| **LIVE Mailgun send test** (user-requested) | ⏳ pending user | requires the user to place the Mailgun API key in `secrets/smtp_password`, plus an authorized recipient + From address — see below |
+| **LIVE Mailgun send test** (user-requested) | ✅ | email channel `username=vigil@sandbox….mailgun.org` **≠** `from=alerts@sandbox….mailgun.org`, host `smtp.mailgun.org:587` starttls, SMTP password from the Docker secret → `POST /channels/:id/test` → `ok:true` (Mailgun accepted delivery to `pystriker@gmail.com`). Proves the `username ≠ from` SMTP-auth path end-to-end against a real provider. |
 | Docker rebuild → healthy on 8099 | ✅ | `docker compose up -d --build` → `health: healthy`, `GET /api/monitors` HTTP 200 on `0.0.0.0:8099` |
+
+**All P3 DoD items verified.** The one live bug (RDAP User-Agent) was found and fixed during this pass.
 
 ## Final whole-branch review (opus): **Ready-to-merge**
 No Critical/Important. All 8 cross-cutting concerns verified adversarially (fire-once end-to-end incl.
