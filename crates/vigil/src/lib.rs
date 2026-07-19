@@ -10,6 +10,7 @@ pub mod engine;
 pub mod events;
 pub mod heartbeat;
 pub mod maintenance;
+pub mod maintenance_windows;
 pub mod models;
 pub mod notify;
 pub mod probe;
