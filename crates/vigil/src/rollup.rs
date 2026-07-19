@@ -129,7 +129,12 @@ async fn rollup_monitor_day(
     // A completed day: evaluate uptime as of its end (`now = de`), always
     // `had_any_check = true` since we only get here for monitors that had
     // at least one check this day.
-    let uptime = uptime::compute(&spans, ds, de, true);
+    // Rollups are computed once, at ingest time, and never retroactively
+    // rewritten when a maintenance window is created/edited later — so daily
+    // aggregates intentionally do not exclude maintenance (`&[]`). Only the
+    // live `stats`/`bars` read paths (which recompute from `incidents` on
+    // every request) apply the exclusion.
+    let uptime = uptime::compute(&spans, ds, de, true, &[]);
 
     sqlx::query(
         "INSERT INTO check_aggregates_daily \

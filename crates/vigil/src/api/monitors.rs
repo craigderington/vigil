@@ -612,18 +612,25 @@ pub async fn stats(
     // from incidents instead. A never-pinged heartbeat (`armed == false`)
     // stays gated on `had_any_check` (false) so it still reports
     // `uptime_pct: None`, matching the "waiting" UI.
-    let hb_row: Option<(String, Option<i64>)> =
-        sqlx::query_as("SELECT type, last_ping_at FROM monitors WHERE id = ?")
+    let hb_row: Option<(String, Option<i64>, Option<String>)> =
+        sqlx::query_as("SELECT type, last_ping_at, tags FROM monitors WHERE id = ?")
             .bind(id)
             .fetch_optional(&state.db)
             .await
             .map_err(db_err)?;
-    let (is_heartbeat, armed) = match &hb_row {
-        Some((r#type, last_ping_at)) => (r#type == "heartbeat", last_ping_at.is_some()),
-        None => (false, false),
+    let (is_heartbeat, armed, tags) = match &hb_row {
+        Some((r#type, last_ping_at, tags)) => (r#type == "heartbeat", last_ping_at.is_some(), tags.clone()),
+        None => (false, false, None),
     };
 
-    let u = uptime::compute(&spans, window_start, ts, had_any_check || (is_heartbeat && armed));
+    // Maintenance time must not count against uptime % (spec §8): fetch the
+    // currently-active windows and resolve which intervals of this window
+    // apply to this monitor (given its tags), regardless of suppress mode.
+    let windows = crate::maintenance_windows::active_windows(&state.db).await;
+    let parsed_tags = crate::maintenance_windows::resolve::parse_tags(tags.as_deref().unwrap_or(""));
+    let maintenance = crate::maintenance_windows::resolve::maintenance_intervals(&windows, id, &parsed_tags, window_start, ts);
+
+    let u = uptime::compute(&spans, window_start, ts, had_any_check || (is_heartbeat && armed), &maintenance);
 
     // 24h/7d: a straight average over raw `checks` is cheap and precise
     // enough. 30d/90d: raw checks that old may already be pruned (retention
@@ -795,20 +802,24 @@ pub async fn bars(
     // heartbeat could plausibly have signal for (created, or first armed by
     // a ping if that's earlier) — a String (not an epoch) because the whole
     // bars pipeline compares UTC day strings (`rollup::day_str`).
-    let hb_row: Option<(String, Option<i64>, i64)> =
-        sqlx::query_as("SELECT type, last_ping_at, created_at FROM monitors WHERE id = ?")
+    let hb_row: Option<(String, Option<i64>, i64, Option<String>)> =
+        sqlx::query_as("SELECT type, last_ping_at, created_at, tags FROM monitors WHERE id = ?")
             .bind(id)
             .fetch_optional(&state.db)
             .await
             .map_err(db_err)?;
-    let (is_heartbeat, armed, first_active_day) = match &hb_row {
-        Some((r#type, last_ping_at, created_at)) => {
+    let (is_heartbeat, armed, first_active_day, tags) = match &hb_row {
+        Some((r#type, last_ping_at, created_at, tags)) => {
             let created_at = *created_at;
             let earliest = created_at.min(last_ping_at.unwrap_or(created_at));
-            (r#type == "heartbeat", last_ping_at.is_some(), crate::rollup::day_str(earliest))
+            (r#type == "heartbeat", last_ping_at.is_some(), crate::rollup::day_str(earliest), tags.clone())
         }
-        None => (false, false, String::new()),
+        None => (false, false, String::new(), None),
     };
+    let parsed_tags = crate::maintenance_windows::resolve::parse_tags(tags.as_deref().unwrap_or(""));
+    // Loaded once for the whole day loop below (spec §8: maintenance must
+    // not count against uptime %, resolved per-day from the same window set).
+    let maint_windows = crate::maintenance_windows::active_windows(&state.db).await;
 
     let retention = crate::settings_store::retention_days(&state.db).await;
     crate::rollup::ensure_aggregates(&state.db, id, retention)
@@ -875,7 +886,14 @@ pub async fn bars(
             .copied()
             .collect();
 
-        let u = uptime::compute(&day_spans, ds, clipped_end, true);
+        let day_maintenance = crate::maintenance_windows::resolve::maintenance_intervals(
+            &maint_windows,
+            id,
+            &parsed_tags,
+            ds,
+            clipped_end,
+        );
+        let u = uptime::compute(&day_spans, ds, clipped_end, true, &day_maintenance);
 
         let incidents =
             all_spans.iter().filter(|s| s.start >= ds && s.start < de).count() as i64;
