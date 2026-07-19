@@ -85,9 +85,10 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
 **Interfaces produced:** `MaintenanceWindow`, the DTOs, `validate_window_dto`, `croner` available.
 
 - [ ] **Step 1: `0005_maintenance_windows.sql`** — the §2 `CREATE TABLE` verbatim (no index).
-- [ ] **Step 2: Add dep** — `croner = "2"` in Cargo.toml. `cargo build`, then `cargo tree -p vigil
-  -e normal,build,dev | grep -iE 'aws-lc|openssl'` MUST be empty (croner pulls chrono(clock) +
-  iana-time-zone — both pure; if aws-lc appears, stop and report).
+- [ ] **Step 2: Add dep** — **`croner = "2"`** in Cargo.toml (the `"2"` pin is load-bearing: croner
+  3.x removed `Cron::new(expr).parse()` — every snippet here uses the 2.x API). `cargo build`, then
+  `cargo tree -p vigil -e normal,build,dev | grep -iE 'aws-lc|openssl'` MUST be empty (croner pulls
+  chrono(clock) + iana-time-zone — both pure; if aws-lc appears, stop and report).
 - [ ] **Step 3: Failing test** — `tests/migrate5.rs`: fresh DB → `MAX(version)=5` + `SELECT * FROM
   maintenance_windows` succeeds; a v4-DB upgrade test (apply 0001-0004, record versions, connect →
   only 0005 applies, prior data preserved). Plus validation unit tests: valid create; 422 on bad scope,
@@ -109,7 +110,16 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
 **Files:** Create `crates/vigil/src/maintenance_windows/mod.rs`, `.../resolve.rs`; Modify `src/lib.rs`
 (`pub mod maintenance_windows;`). Test: inline `#[cfg(test)]` in resolve.rs.
 
-**Interfaces produced:** all the resolve fns (see Shared Types).
+**Interfaces produced:** all the resolve fns (see Shared Types) **AND `pub async fn active_windows(pool:
+&sqlx::SqlitePool) -> Vec<MaintenanceWindow>`** (in `mod.rs`: `sqlx::query_as("SELECT * FROM
+maintenance_windows WHERE is_active = 1").fetch_all(pool).await.unwrap_or_default()`) — Tasks 3/4/5 all
+consume it, so it MUST be created here (GAP A).
+
+**croner 2.x API (pin — the plan snippets below use these exact shapes):** `croner::Cron::new(expr)
+.parse()? -> Cron`; `cron.find_next_occurrence(&dt, inclusive: bool) -> Result<DateTime<Tz>, CronError>`
+(takes a **reference**, returns a **Result**). Epoch↔chrono: `chrono::DateTime::<chrono::Utc>::
+from_timestamp(t, 0)` returns an **`Option`** (handle `None` → treat as "no occurrence", never
+`unwrap`); `.timestamp()` back to i64.
 
 - [ ] **Step 1: Failing tests** (inline) — the §9 pure-resolve cases: `window_active_at` one-off
   before/during/after + cron active-in-occurrence / inactive-between / inactive-before-starts_at +
@@ -120,8 +130,13 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
   `subtract_intervals` partial/full/none/multiple cuts; `parse_tags`. Run → FAIL.
 - [ ] **Step 2: Implement.** `parse_tags`: `serde_json::from_str::<Vec<String>>(raw).unwrap_or_default()`.
   `window_active_at`: one-off `starts_at<=now<=ends_at`; cron — `dur=ends_at-starts_at`, scan from
-  `anchor=max(starts_at, now-dur)`, iterate `Cron::find_next_occurrence` (chrono UTC DateTime)
-  collecting the last start `s<=now`, active iff `s>=starts_at && now<s+dur`. `monitor_in_scope`: match
+  `anchor=max(starts_at, now-dur)`, iterate `cron.find_next_occurrence(&dt, /*inclusive=*/true)` on the
+  FIRST call (**inclusive=true so an occurrence starting exactly at the anchor is not skipped** — else a
+  window active at its occurrence start reports false-inactive), then advance `t = s + 1s` (inclusive
+  false or +1s) each step, collecting the last start `s<=now`; active iff `s>=starts_at && now<s+dur`.
+  Convert epochs via `from_timestamp(t,0)` (bail to `false` on `None`); handle the `Result` from
+  `find_next_occurrence` (`Ok` continue, `Err`/None-return → stop). **Cap the scan** the same as
+  `occurrences_overlapping` (below) with a `tracing::warn!` on hit — it runs on every alert/probe. `monitor_in_scope`: match
   on `scope` — `all`→true; `tag`→`parse target_ref as JSON String`, `tags.contains`; `monitors`→`parse
   target_ref as Vec<i64>`, `.contains(&monitor_id)`; parse failure→false. `maintenance_for`: fold over
   `windows.iter().filter(|w| w.is_active && window_active_at(w,now) && monitor_in_scope(w,id,tags))`,
@@ -136,7 +151,9 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
 
 ## Task 3: `uptime::compute` maintenance param + stats/bars callers
 
-**Files:** Modify `crates/vigil/src/uptime.rs` (compute), `src/api/monitors.rs` (stats, bars). Test:
+**Files:** Modify `crates/vigil/src/uptime.rs` (compute + its in-file unit tests at uptime.rs:70/77/83/90),
+`src/api/monitors.rs` (stats, bars), **`src/rollup.rs` (the `uptime::compute(&spans, ds, de, true)` call
+at rollup.rs:132 — a THIRD production caller; add the arg here too, GAP B)**. Test:
 `tests/maintenance_uptime.rs`, extend uptime unit tests.
 
 **Interfaces:** `compute(.., maintenance:&[(Ts,Ts)])`.
@@ -146,11 +163,14 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
   maintenance → `uptime_pct:None`. Integration `maintenance_uptime.rs`: a monitor with a resolved
   incident (1h) that FULLY overlaps an active one-off window → `GET /stats?range=24h` → `downtime_seconds
   ~0` and `uptime_pct ~100`. Run → FAIL.
-- [ ] **Step 2: Implement.** `compute` gains `maintenance:&[(Ts,Ts)]`: `eff_denom = (now-window_start) -
-  sum(overlap of each maintenance interval with [window_start,now])`; per down-span clipped to the
-  window, `subtract_intervals(span, maintenance)` then sum → `eff_downtime`; if `eff_denom<=0` →
-  `{None,0}`; else `uptime_pct = round2(100*(1 - eff_downtime/eff_denom))`. **Update EVERY existing
-  caller to pass `&[]`** (grep `uptime::compute(` — the 90-day-bar per-day call + any others) EXCEPT:
+- [ ] **Step 2: Implement.** `compute` gains `maintenance:&[(Ts,Ts)]`. **First, inside compute, clip
+  each maintenance interval to `[window_start,now]` and MERGE into disjoint intervals** (so the
+  denominator subtraction stays correct even if a caller passes an unmerged set — S4). `eff_denom =
+  (now-window_start) - sum(len of merged maintenance)`; per down-span clipped to the window,
+  `subtract_intervals(span, merged)` then sum gives `eff_downtime`; if `eff_denom<=0` then `{None,0}`;
+  else `uptime_pct = round2(100*(1 - eff_downtime/eff_denom))`. **Update EVERY caller to pass `&[]`** —
+  grep `uptime::compute(` finds the in-file unit tests at **uptime.rs:70/77/83/90**, the 90-day-bar
+  per-day call, and **rollup.rs:132** (all `&[]`) EXCEPT:
   `stats` (monitors.rs:~599-626) fetches the monitor `tags` + `active_windows(&db)` and passes
   `maintenance_intervals(id, tags, &windows, window_start, now)`; the `bars` builder (monitors.rs:~767-)
   fetches tags+windows once and passes per-day `maintenance_intervals(id,tags,&windows, day_start,
@@ -180,14 +200,19 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
   - `deliver` (dispatch.rs:142, top): `let windows = maintenance_windows::active_windows(&state.db).await;
     if maintenance_windows::resolve::maintenance_for(m.id, &parse_tags(&m.tags), &windows, now).is_some()
     { tracing::debug!(monitor_id=m.id, "alert suppressed by maintenance window"); return Ok(()); }`.
-  - `worker::run_check` (after the heartbeat guard, ~worker.rs:60): load active windows;
-    `if let Some(Suppress::Checks) = maintenance_for(m.id, &parse_tags(&m.tags), &windows, now) { let next
-    = scheduler::next_run_with_jitter(now, m.interval_seconds); sqlx::query("UPDATE monitors SET
-    next_run_at=? WHERE id=?").bind(next).bind(m.id).execute(&state.db).await.ok(); signal_complete(state,
-    monitor_id); return; }`.
-  - `heartbeat::reap_once`: after the due-SELECT, load active windows once; filter the due list —
-    `due.retain(|m| !matches!(maintenance_for(m.id, &parse_tags(&m.tags), &windows, now),
-    Some(Suppress::Checks)))` (Checks-ONLY) — BEFORE calling `reap_one` (outside the tx).
+  - `worker::run_check` (after the heartbeat guard, ~worker.rs:60): **`let now = now();`** FIRST (the
+    existing `let now = now()` isn't bound until ~worker.rs:69, so at this insertion point `now` would
+    resolve to the imported fn item — bind it locally here), then load active windows; `if let
+    Some(Suppress::Checks) = maintenance_for(m.id, &parse_tags(&m.tags), &windows, now) { let next =
+    scheduler::next_run_with_jitter(now, m.interval_seconds); if let Err(e) = sqlx::query("UPDATE
+    monitors SET next_run_at=? WHERE id=?").bind(next).bind(m.id).execute(&state.db).await {
+    tracing::error!(monitor_id=m.id, error=%e, "maintenance checks-window: failed to advance next_run_at");
+    } signal_complete(state, monitor_id); return; }`. (Log, don't `.ok()`-swallow — a silent write
+    failure here would leave the stale `next_run_at` and re-introduce the hot-loop — S2.)
+  - `heartbeat::reap_once`: after the due-SELECT (change `let due` at heartbeat.rs:182 to **`let mut
+    due`** — it's immutable today), load active windows once; filter — `due.retain(|m|
+    !matches!(maintenance_for(m.id, &parse_tags(&m.tags), &windows, now), Some(Suppress::Checks)))`
+    (Checks-ONLY) — BEFORE calling `reap_one` (OUTSIDE the `BEGIN IMMEDIATE` tx).
 - [ ] **Step 3: Run → PASS** + suite + clippy. **Step 4: Commit** `git commit -am "feat: maintenance suppression — alerts in deliver(), checks in worker (advance next_run) + heartbeat reaper (checks-only)"`
 
 ---
@@ -205,10 +230,14 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
   monitor's id in `maintenance_ids`. Run → FAIL.
 - [ ] **Step 2: Implement.** `events.rs`: add `MaintenanceChanged { id:i64, in_maintenance:bool }` (serde
   tag `maintenance_changed`) and `maintenance_ids: Vec<i64>` to `Snapshot`. `maintenance_windows`:
-  `pub async fn monitors_in_maintenance(pool) -> Vec<i64>` (load active windows + `SELECT id, tags FROM
-  monitors`, return ids where `maintenance_for(..).is_some()`); `eval_once(state, prev:&mut HashSet<i64>)`
-  computes the current set, diffs vs `prev`, emits `MaintenanceChanged` per entered/exited, updates
-  `prev`; `run(state)` loops `sleep(maintenance_tick_seconds)` calling `eval_once`. `sse::build_snapshot`:
+  **`pub async fn monitors_in_maintenance(pool) -> Vec<i64>`** (load active windows + `SELECT id, tags
+  FROM monitors`, return ids where `maintenance_for(..).is_some()`); **`pub async fn eval_once(state:
+  &AppState, prev:&mut std::collections::HashSet<i64>)`** (both `pub` — `tests/maintenance_evaluator.rs`
+  calls `eval_once` directly as an integration test) computes the current set, diffs vs `prev`, emits
+  `let _ = state.bus.send(Event::MaintenanceChanged{ id, in_maintenance })` per entered/exited (the
+  `let _` matters — a tokio broadcast `send` returns `Err` when zero SSE clients are connected, which is
+  the common case — S9), updates `prev`; `run(state)` loops `sleep(maintenance_tick_seconds)` with a
+  task-local `HashSet` calling `eval_once`. `sse::build_snapshot`:
   `let maintenance_ids = maintenance_windows::monitors_in_maintenance(&state.db).await;` into the Snapshot.
   `settings_store::maintenance_tick_seconds` (key `maintenance.tick_seconds`, default 30). `main::serve`:
   `tokio::spawn(vigil::maintenance_windows::run(state.clone()));`.
@@ -227,41 +256,66 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
   `{scope:"tag", target_ref:"prod"}` → `affected_monitor_ids` = the monitors tagged prod + `active_now`;
   DELETE. Run → FAIL.
 - [ ] **Step 2: Implement.** `list` (`SELECT * ORDER BY id`), `create` (validate → `serde_json::to_string`
-  the target_ref → INSERT → return row), `update` (validate → UPDATE the provided fields), `delete`.
-  `preview` (POST, body `{scope, target_ref, recurrence?, starts_at?, ends_at?}`): build a transient
-  `MaintenanceWindow`-like value, `SELECT id, tags FROM monitors`, return `{ affected_monitor_ids:
-  monitors where monitor_in_scope, active_now: window_active_at(transient, now) }`. Register routes in
-  `api/mod.rs`: `.route("/maintenance-windows", get(maintenance::list).post(maintenance::create))`,
-  `.route("/maintenance-windows/preview", post(maintenance::preview))`,
-  `.route("/maintenance-windows/:id", put(maintenance::update).delete(maintenance::delete))`.
+  the target_ref → INSERT → return row). `update`: **merge-then-validate** — fetch the existing row,
+  apply the `Option` DTO fields over it, `validate_window_dto` the MERGED window, then UPDATE (S10 — the
+  validator needs a complete window; a partial PATCH validated alone would reject/misfire). `delete`.
+  `preview` (POST, body `{scope, target_ref, recurrence?, starts_at?, ends_at?}`): `SELECT id, tags FROM
+  monitors`, return `{ affected_monitor_ids: monitors where monitor_in_scope(scope,target_ref,..),
+  active_now: <bool> }` where `active_now` is `window_active_at` of a transient window **only when both
+  `starts_at` and `ends_at` are supplied** (a create-form has them); if either is omitted, return
+  `active_now: null` (undefined without a duration — the missed-gap note). Register routes in
+  `api/mod.rs` (**`put` is NOT in the `use axum::routing::{get, post}` import at mod.rs:15 — fully-
+  qualify it like the channels route does**): `.route("/maintenance-windows",
+  get(maintenance::list).post(maintenance::create))`, `.route("/maintenance-windows/preview",
+  post(maintenance::preview))`, `.route("/maintenance-windows/:id",
+  axum::routing::put(maintenance::update).delete(maintenance::delete))`.
 - [ ] **Step 3: Run → PASS** + suite + clippy. **Step 4: Commit** `git commit -am "feat: maintenance-windows CRUD + body-driven preview API"`
 
 ---
 
 ## Task 7: Frontend — Maintenance screen + maintenanceIds overlay + Rail/TopBar
 
-**Files:** Create `web/src/components/Maintenance.tsx`; Modify `web/src/api.ts`, `web/src/store.ts`,
-`web/src/components/Rail.tsx`, `web/src/components/TopBar.tsx`, `web/src/components/MonitorCard.tsx`,
-`web/src/components/ListView.tsx`, `web/src/components/DetailPanel.tsx`, `web/src/App.tsx`,
-`web/src/theme.css`. Tests: `web/src/__tests__/maintenance.test.tsx`, extend `store.test.ts`.
+**Files:** Create `web/src/components/Maintenance.tsx`, `web/src/maintenance_ids.ts` (the module-level
+signal); Modify `web/src/api.ts`, `web/src/store.ts`, `web/src/components/Rail.tsx`,
+`web/src/components/TopBar.tsx`, `web/src/components/MonitorCard.tsx`, `web/src/components/ListView.tsx`,
+`web/src/components/DetailPanel.tsx`, `web/src/App.tsx` (view type + routing + filter), `web/src/theme.css`.
+Tests: `web/src/__tests__/maintenance.test.tsx`, extend `store.test.ts`.
 
 - [ ] **Step 1: Failing tests** — `maintenance.test.tsx`: the screen renders a window list + a create
   form; the scope picker toggles tag/monitors inputs; the one-off↔recurring toggle swaps datetime vs a
   cron field; saving calls `createMaintenanceWindow` with the right DTO. `store.test.ts`: a `snapshot`
-  frame with `maintenance_ids:[1]` seeds `maintenanceIds`; a `maintenance_changed{id:1,in_maintenance:
-  false}` frame removes it; `maintenanceClass(monitor)` returns `"maintenance"` for an in-set monitor and
-  `"paused"` for a paused one even if in-set (precedence). Run → FAIL.
-- [ ] **Step 2: Implement.** `api.ts`: the 5 CRUD/preview fns. `store.ts`: a `maintenanceIds` signal
-  (mirror the `certBump` pattern at store.ts:110); in the SSE handler, on `snapshot` set it from
-  `data.maintenance_ids`, on `maintenance_changed` add/remove `data.id`; expose `maintenanceIds()` +
-  a helper `inMaintenance(id)`. Status rendering: a shared `displayStatus(monitor)` =
-  `monitor.is_paused ? "paused" : (inMaintenance(monitor.id) ? "maintenance" : monitor.status)` used by
-  MonitorCard/ListView/DetailPanel pills+dots. `Maintenance.tsx`: the list + create form (scope picker,
-  one-off/recurring toggle with a cron field + a **local-time** next-fire preview, suppress radio, live
-  "affects N" via `previewMaintenanceWindow`). `Rail.tsx`: add a maintenance count to the summary
-  (`inMaintenance(m.id)`); a "Maintenance" nav entry → `Maintenance` view in App.tsx. `TopBar.tsx`: add
-  `"maintenance"` to `STATUS_CHIPS`. `theme.css`: **add `.status-dot.maintenance { background:
-  var(--maintenance) }`**.
+  frame with `maintenance_ids:[1]` REPLACES the set (a resync snapshot must reset, not accumulate — S6);
+  a `maintenance_changed{id:1,in_maintenance:false}` frame removes it; the PURE
+  `displayStatus(monitor, ids)` returns `"maintenance"` for an in-set monitor and `"paused"` for a
+  paused one even if in-set (precedence). Run → FAIL.
+- [ ] **Step 2: Implement.**
+  - **`web/src/maintenance_ids.ts` (MODULE-LEVEL, so leaf components can read it without the store
+    instance — M7):** `const [ids, setIds] = createSignal<Set<number>>(new Set());
+    export const inMaintenance = (id:number) => ids().has(id); export function setMaintenanceIds(list:
+    number[]) { setIds(new Set(list)); } export function patchMaintenance(id:number, on:boolean) { ... };
+    export function displayStatus(m:{id:number,is_paused?:boolean,status:string}) { return m.is_paused ?
+    "paused" : (inMaintenance(m.id) ? "maintenance" : m.status); }` (PURE-ish — `displayStatus` reads the
+    module signal; the store.test asserts a param-taking variant `displayStatusWith(m, idsSet)` for pure
+    testability, and `displayStatus` calls it with `ids()`).
+  - `store.ts` SSE handler: on `snapshot` → `setMaintenanceIds(frame.data.maintenance_ids ?? [])`
+    (REPLACE); on `maintenance_changed` → `patchMaintenance(frame.data.id, frame.data.in_maintenance)`.
+  - `MonitorCard.tsx` (local `statusClass` at :21), `ListView.tsx` (:46), `DetailPanel.tsx`: render the
+    pill+dot from `displayStatus(monitor)` (import from `maintenance_ids.ts`) instead of
+    `monitor.status`.
+  - `App.tsx`: **add `"maintenance"` to the `RailView` type (Rail.tsx:3) and the `view` signal; add a
+    `<Match when={view()==="maintenance"}><Maintenance/></Match>` branch; fix the nav mapping at
+    App.tsx:70 so `"maintenance"` is not collapsed to `"dashboard"` (M8).** In `filtered()` (App.tsx:25-34)
+    **special-case the maintenance chip: `status === "maintenance" ? inMaintenance(m.id) : m.status ===
+    status`** — since `monitor.status` is never `"maintenance"`, a plain equality chip would filter to
+    zero (M9).
+  - `Rail.tsx`: the summary (Rail.tsx:25-35) adds a maintenance tally using `inMaintenance(m.id)` with
+    the same `is_paused > maintenance > real` precedence (import `inMaintenance` — no prop-drilling
+    needed since it's module-level — S7); add a "Maintenance" nav entry.
+  - `TopBar.tsx`: add `"maintenance"` to `STATUS_CHIPS` (TopBar.tsx:15).
+  - `Maintenance.tsx`: list + create form (scope picker, one-off/recurring toggle with a cron field + a
+    **local-time** next-fire preview, suppress radio, live "affects N" via `previewMaintenanceWindow`).
+  - `api.ts`: the 5 CRUD/preview fns. `theme.css`: **add `.status-dot.maintenance { background:
+    var(--maintenance) }`** (the grid/list dots have no maintenance rule today — M7 dot half).
 - [ ] **Step 3: Run → PASS** + `npx tsc --noEmit` + `npx vite build`. **Step 4: Commit** `git commit -am "feat(web): maintenance screen + maintenanceIds overlay (pill/dot precedence) + Rail/TopBar + CSS"`
 
 ---
@@ -289,5 +343,12 @@ models). Test: `tests/migrate5.rs`, unit tests for validation.
 Windows creatable (one-off + cron, all/tag/monitors scope); alerts suppressed + checks paused (with
 `next_run_at` advanced) during active windows; uptime excludes maintenance on live stats/bars; the
 MAINTENANCE overlay shows live via `maintenance_ids`/`MaintenanceChanged` with paused>maintenance>real
-precedence and no flicker; the Maintenance UI works; `cargo test` + `vitest` green; `0005` on a P4.1 DB;
-no aws-lc/openssl; Docker healthy; every task committed.
+precedence and no flicker; the Maintenance UI (reachable via the Rail) works; `cargo test` + `vitest`
+green; `0005` on a P4.1 DB; no aws-lc/openssl; Docker healthy; every task committed.
+
+**Known v1 boundaries (documented, not silent):** (1) uptime exclusion is computed from the CURRENT
+`is_active=1` window set — toggling a window inactive or deleting it stops excluding its past downtime,
+so historical uptime % can shift retroactively when an operator edits a window; and it excludes nothing
+for a window that was active during an incident but is inactive now. (2) The durable
+`check_aggregates_daily` rollups are not retroactively rewritten (§5.4). Add a Task-2/Task-5 **invariant
+test** asserting no code path ever writes `"maintenance"` into the `monitors.status` column (O2).
