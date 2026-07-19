@@ -1,10 +1,12 @@
 //! Heartbeat (push) monitor support (§3 "Heartbeat (push)", §9
 //! `heartbeat_token`). Holds the capability-token generator used by
-//! `api::monitors::create`, and the `/ping/:token` receiver: `record_ping`
-//! (the atomic ping/conditional-recover transaction) + the axum handler.
-//! The reaper (missed-ping -> down) lands in a later P4.1 task.
+//! `api::monitors::create`, the `/ping/:token` receiver (`record_ping` — the
+//! atomic ping/conditional-recover transaction — + the axum handler), and
+//! the reaper (`reap_once`/`run_reaper`): a periodic task that drives a
+//! pinged-then-silent heartbeat DOWN once it's overdue by `interval_seconds
+//! + heartbeat_grace_seconds`.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -14,7 +16,8 @@ use sqlx::Connection;
 use crate::app::AppState;
 use crate::engine;
 use crate::events::Event;
-use crate::models::{Monitor, Status};
+use crate::models::{Monitor, Status, Trigger};
+use crate::settings_store;
 
 /// A 32-char alphanumeric capability token for a heartbeat monitor's
 /// `/ping/:token` push-URL. Not a guessable sequence — this is the sole
@@ -151,6 +154,121 @@ pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result
     }
 
     Ok(())
+}
+
+/// Selects every heartbeat monitor overdue by more than `interval_seconds +
+/// heartbeat_grace_seconds` since its last ping and reaps it (drives it
+/// DOWN, opens an incident, dispatches `heartbeat_missed`) — the other half
+/// of heartbeat liveness (`record_ping` above arms/recovers on an inbound
+/// ping; this reaps silence).
+///
+/// **Single-arm due-query**: `type='heartbeat' AND is_paused=0 AND
+/// status='up' AND last_ping_at IS NOT NULL AND <overdue>`. A never-pinged
+/// heartbeat (`last_ping_at IS NULL`) is deliberately excluded, not an
+/// OR-arm of "overdue OR never-pinged" — the switch only arms on the first
+/// ping (`record_ping`'s doc), so a monitor that has never been pinged has
+/// nothing to have "missed" yet.
+///
+/// Heartbeats are **not anchor-gated**: unlike `apply_result`, this never
+/// reads `state.anchor` — a missed ping is real signal regardless of the
+/// local connection's state, so a `DOWN` transition + alert fire even while
+/// the anchor reports offline.
+///
+/// Per-monitor errors are logged and skipped so one bad row can't stall the
+/// pass.
+pub async fn reap_once(state: &AppState) -> anyhow::Result<()> {
+    let n = now();
+
+    let due: Vec<Monitor> = sqlx::query_as(
+        "SELECT * FROM monitors WHERE type = 'heartbeat' AND is_paused = 0 AND status = 'up' \
+         AND last_ping_at IS NOT NULL \
+         AND ? > last_ping_at + interval_seconds + heartbeat_grace_seconds",
+    )
+    .bind(n)
+    .fetch_all(&state.db)
+    .await?;
+
+    for m in due {
+        if let Err(e) = reap_one(state, &m, n).await {
+            tracing::warn!(monitor_id = m.id, error = %e, "heartbeat reap_one failed");
+        }
+    }
+
+    Ok(())
+}
+
+/// Reaps a single overdue heartbeat monitor `m` (called only for rows the
+/// due-query in `reap_once` already selected as stale at time `n`). Runs
+/// the status-flip + incident-insert as ONE `BEGIN IMMEDIATE` transaction —
+/// a real sqlx `Transaction` guard (`conn.begin_with`), not a raw
+/// `sqlx::query("BEGIN IMMEDIATE").execute(..)`: `Transaction::drop` rolls
+/// back automatically on an early `?`-return, so the IMMEDIATE write lock
+/// can never be leaked on an error path (see `record_ping`'s doc for the
+/// full rationale — Task 5's review proved the raw form leaks the lock).
+///
+/// The DOWN `UPDATE` **re-asserts the staleness predicate** (`status='up'
+/// AND now > last_ping_at + interval_seconds + heartbeat_grace_seconds`),
+/// so a ping that refreshed `last_ping_at` between `reap_once`'s SELECT and
+/// this UPDATE makes `rows_affected == 0` — no false incident. An incident
+/// is opened only when `rows_affected == 1`. Events/notifications are
+/// dispatched only after a successful `COMMIT`, and only if the monitor
+/// actually transitioned.
+async fn reap_one(state: &AppState, m: &Monitor, n: i64) -> anyhow::Result<()> {
+    let mut conn = state.db.acquire().await?;
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
+
+    let r = sqlx::query(
+        "UPDATE monitors SET status='down', updated_at=?1 \
+         WHERE id=?2 AND status='up' \
+         AND ?1 > last_ping_at + interval_seconds + heartbeat_grace_seconds",
+    )
+    .bind(n)
+    .bind(m.id)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut incident_id: Option<i64> = None;
+    if r.rows_affected() == 1 {
+        let iid: i64 = sqlx::query_scalar(
+            "INSERT INTO incidents (monitor_id, started_at, cause, error_message) \
+             VALUES (?, ?, 'heartbeat', 'no ping within interval + grace') RETURNING id",
+        )
+        .bind(m.id)
+        .bind(n)
+        .fetch_one(&mut *tx)
+        .await?;
+        incident_id = Some(iid);
+    }
+
+    tx.commit().await?;
+    drop(conn);
+
+    // Events/notifications are side effects that happen only after a
+    // successful commit, and only if this call actually transitioned the
+    // monitor (a concurrent ping could have made rows_affected 0 above).
+    if let Some(iid) = incident_id {
+        engine::emit_opened(state, m, iid, Status::Up, Status::Down, Trigger::HeartbeatMissed).await;
+        let _ = state.bus.send(Event::MonitorUpdated {
+            id: m.id,
+            status: Status::Down,
+            response_time_ms: None,
+            checked_at: n,
+        });
+    }
+
+    Ok(())
+}
+
+/// The heartbeat reaper loop: wakes every `heartbeat.tick_seconds` (default
+/// 20) and reaps overdue heartbeats. Runs for the lifetime of the app.
+/// Errors from a pass are logged inside `reap_once`/`reap_one`, never
+/// propagated here, so the loop itself can never die from a bad row.
+pub async fn run_reaper(state: AppState) {
+    loop {
+        let tick = settings_store::heartbeat_tick_seconds(&state.db).await;
+        tokio::time::sleep(Duration::from_secs(tick.max(1) as u64)).await;
+        let _ = reap_once(&state).await;
+    }
 }
 
 /// `GET|POST /ping/:token` — the heartbeat receiver. 404 on an unknown

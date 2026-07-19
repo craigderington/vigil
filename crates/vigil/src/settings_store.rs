@@ -11,6 +11,7 @@ const DEFAULT_CERT_SSL_INTERVAL_SECONDS: i64 = 43_200; // 12h
 const DEFAULT_CERT_DOMAIN_INTERVAL_SECONDS: i64 = 86_400; // 24h
 const DEFAULT_CERT_TICK_SECONDS: i64 = 60;
 const DEFAULT_CERT_CONCURRENCY: i64 = 5;
+const DEFAULT_HEARTBEAT_TICK_SECONDS: i64 = 20;
 
 /// Reads `key`, returning `default` if the row is absent.
 pub async fn get(pool: &SqlitePool, key: &str, default: &str) -> String {
@@ -102,4 +103,13 @@ pub async fn cert_concurrency(pool: &SqlitePool) -> i64 {
         .await
         .parse()
         .unwrap_or(DEFAULT_CERT_CONCURRENCY)
+}
+
+/// `heartbeat.tick_seconds` — how often `heartbeat::run_reaper`'s loop
+/// wakes to re-select and reap overdue heartbeat monitors. Default 20.
+pub async fn heartbeat_tick_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "heartbeat.tick_seconds", &DEFAULT_HEARTBEAT_TICK_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_HEARTBEAT_TICK_SECONDS)
 }
