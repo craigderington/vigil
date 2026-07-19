@@ -25,7 +25,8 @@ async fn build_snapshot(state: &AppState) -> Event {
         .await
         .unwrap_or_default();
     let online = matches!(state.anchor.current().await, Connectivity::Online);
-    Event::Snapshot { monitors, online }
+    let maintenance_ids = crate::maintenance_windows::monitors_in_maintenance(&state.db).await;
+    Event::Snapshot { monitors, online, maintenance_ids }
 }
 
 fn to_sse(ev: &Event, id: u64) -> SseEvent {

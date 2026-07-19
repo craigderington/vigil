@@ -12,6 +12,7 @@ const DEFAULT_CERT_DOMAIN_INTERVAL_SECONDS: i64 = 86_400; // 24h
 const DEFAULT_CERT_TICK_SECONDS: i64 = 60;
 const DEFAULT_CERT_CONCURRENCY: i64 = 5;
 const DEFAULT_HEARTBEAT_TICK_SECONDS: i64 = 20;
+const DEFAULT_MAINTENANCE_TICK_SECONDS: i64 = 30;
 
 /// Reads `key`, returning `default` if the row is absent.
 pub async fn get(pool: &SqlitePool, key: &str, default: &str) -> String {
@@ -112,4 +113,15 @@ pub async fn heartbeat_tick_seconds(pool: &SqlitePool) -> i64 {
         .await
         .parse()
         .unwrap_or(DEFAULT_HEARTBEAT_TICK_SECONDS)
+}
+
+/// `maintenance.tick_seconds` — how often `maintenance_windows::run`'s loop
+/// wakes to re-evaluate which monitors are currently under an active
+/// maintenance window and publish `Event::MaintenanceChanged` for any that
+/// entered/exited since the last pass. Default 30.
+pub async fn maintenance_tick_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "maintenance.tick_seconds", &DEFAULT_MAINTENANCE_TICK_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_MAINTENANCE_TICK_SECONDS)
 }

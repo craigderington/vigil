@@ -9,7 +9,8 @@ pub enum Event {
     IncidentOpened { id: i64, monitor_id: i64 },
     IncidentResolved { id: i64, monitor_id: i64, duration_seconds: i64 },
     ConnectivityChanged { online: bool },
-    Snapshot { monitors: Vec<Monitor>, online: bool },
+    Snapshot { monitors: Vec<Monitor>, online: bool, maintenance_ids: Vec<i64> },
     CertUpdated { id: i64 },
+    MaintenanceChanged { id: i64, in_maintenance: bool },
 }
 pub type Bus = tokio::sync::broadcast::Sender<Event>;
