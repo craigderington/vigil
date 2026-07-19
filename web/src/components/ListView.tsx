@@ -290,9 +290,16 @@ const ListView: Component<ListViewProps> = (props) => {
                     {relativeFrom(m.last_checked_at)}
                   </td>
                   <td class="mono align-right">
-                    <Show when={responseMsFor(m) != null} fallback="—">
-                      {Math.round(responseMsFor(m) as number)}
-                      <span class="unit">ms</span>
+                    <Show
+                      when={m.type === "heartbeat"}
+                      fallback={
+                        <Show when={responseMsFor(m) != null} fallback="—">
+                          {Math.round(responseMsFor(m) as number)}
+                          <span class="unit">ms</span>
+                        </Show>
+                      }
+                    >
+                      {relativeFrom(m.last_ping_at)}
                     </Show>
                   </td>
                   <td class="mono align-right">

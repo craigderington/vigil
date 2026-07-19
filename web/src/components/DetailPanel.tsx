@@ -2,6 +2,7 @@ import { createResource, createSignal, onCleanup, onMount, Show, type Component 
 import * as api from "../api";
 import type { StatsRange } from "../api";
 import DomainCard from "./DomainCard";
+import HeartbeatCard from "./HeartbeatCard";
 import IncidentTimeline from "./IncidentTimeline";
 import ResponseChart from "./ResponseChart";
 import SslCard from "./SslCard";
@@ -67,6 +68,17 @@ function formatDuration(totalSeconds: number | null | undefined): string {
 function absoluteFrom(epochSeconds: number | null | undefined): string | undefined {
   if (epochSeconds == null) return undefined;
   return new Date(epochSeconds * 1000).toLocaleString();
+}
+
+/** `last_ping_at + interval_seconds + heartbeat_grace_seconds` — the same
+ *  overdue boundary the backend reaper uses to drive a silent heartbeat
+ *  DOWN. `null` before the monitor's first ping. */
+function heartbeatNextExpectedBy(monitor: any): number | null {
+  const last = monitor?.last_ping_at;
+  if (last == null) return null;
+  const interval = monitor?.interval_seconds ?? 0;
+  const grace = monitor?.heartbeat_grace_seconds ?? 0;
+  return last + interval + grace;
 }
 
 /**
@@ -176,14 +188,16 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
           </div>
 
           <div class="detail-actions">
-            <button
-              type="button"
-              class="btn-ghost"
-              disabled={busy()}
-              onClick={() => runAction(() => api.checkNow(props.monitor.id))}
-            >
-              Check now
-            </button>
+            <Show when={props.monitor?.type !== "heartbeat"}>
+              <button
+                type="button"
+                class="btn-ghost"
+                disabled={busy()}
+                onClick={() => runAction(() => api.checkNow(props.monitor.id))}
+              >
+                Check now
+              </button>
+            </Show>
             <Show
               when={!props.monitor?.is_paused}
               fallback={
@@ -223,19 +237,39 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
                 {STATUS_LABEL[statusClass(props.monitor)]}
               </span>
             </div>
-            <div class="detail-tile">
-              <span class="detail-tile-label">Response time</span>
-              <span class="detail-tile-value mono">
-                <Show when={displayResponseMs() != null} fallback="No data">
-                  {Math.round(displayResponseMs() as number)}
-                  <span class="unit">ms</span>
-                </Show>
-              </span>
-            </div>
-            <div class="detail-tile" title={absoluteFrom(props.monitor?.last_checked_at)}>
-              <span class="detail-tile-label">Last checked</span>
-              <span class="detail-tile-value mono">{relativeFrom(props.monitor?.last_checked_at)}</span>
-            </div>
+            <Show
+              when={props.monitor?.type === "heartbeat"}
+              fallback={
+                <>
+                  <div class="detail-tile">
+                    <span class="detail-tile-label">Response time</span>
+                    <span class="detail-tile-value mono">
+                      <Show when={displayResponseMs() != null} fallback="No data">
+                        {Math.round(displayResponseMs() as number)}
+                        <span class="unit">ms</span>
+                      </Show>
+                    </span>
+                  </div>
+                  <div class="detail-tile" title={absoluteFrom(props.monitor?.last_checked_at)}>
+                    <span class="detail-tile-label">Last checked</span>
+                    <span class="detail-tile-value mono">{relativeFrom(props.monitor?.last_checked_at)}</span>
+                  </div>
+                </>
+              }
+            >
+              <div class="detail-tile" title={absoluteFrom(props.monitor?.last_ping_at)}>
+                <span class="detail-tile-label">Last ping</span>
+                <span class="detail-tile-value mono">{relativeFrom(props.monitor?.last_ping_at)}</span>
+              </div>
+              <div class="detail-tile">
+                <span class="detail-tile-label">Next expected by</span>
+                <span class="detail-tile-value mono">
+                  <Show when={heartbeatNextExpectedBy(props.monitor) != null} fallback="—">
+                    {absoluteFrom(heartbeatNextExpectedBy(props.monitor))}
+                  </Show>
+                </span>
+              </div>
+            </Show>
           </div>
 
           <div class="uptime-tiles">
@@ -245,7 +279,9 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
             <UptimeTile label="90d" monitorId={props.monitor.id} range="90d" nullText="— · 90d" />
           </div>
 
-          <ResponseChart monitorId={props.monitor.id} />
+          <Show when={props.monitor?.type !== "heartbeat"}>
+            <ResponseChart monitorId={props.monitor.id} />
+          </Show>
 
           <section class="detail-section">
             <h3 class="detail-section-h">90-day uptime</h3>
@@ -258,6 +294,10 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
 
           <Show when={props.monitor?.domain_check_enabled}>
             <DomainCard monitorId={props.monitor.id} certVersion={props.certVersion} />
+          </Show>
+
+          <Show when={props.monitor?.type === "heartbeat"}>
+            <HeartbeatCard monitor={props.monitor} />
           </Show>
 
           <IncidentTimeline monitorId={props.monitor.id} />

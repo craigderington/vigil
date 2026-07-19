@@ -140,6 +140,83 @@ test("switching from https http to port after enabling SSL clears ssl_check_enab
   expect(dto.ssl_check_enabled).toBe(false);
 });
 
+test("type selector: switching to heartbeat hides url/host/cert/threshold fields, hides Test check, and shows grace seconds", async () => {
+  render(() => <MonitorForm api={{} as any} onSaved={()=>{}} onClose={()=>{}} />);
+
+  fireEvent.input(screen.getByLabelText("Name"), { target:{ value:"cron" }});
+  fireEvent.click(screen.getByRole("button", { name: "Heartbeat" }));
+
+  expect(screen.queryByLabelText("URL")).toBeNull();
+  expect(screen.queryByLabelText("Host")).toBeNull();
+  expect(screen.queryByLabelText(/enable ssl/i)).toBeNull();
+  expect(screen.queryByLabelText(/enable domain expiry/i)).toBeNull();
+  expect(screen.queryByLabelText(/confirmation threshold/i)).toBeNull();
+  expect(screen.queryByLabelText(/recovery threshold/i)).toBeNull();
+  expect(screen.queryByText("Test check")).toBeNull();
+
+  const grace = screen.getByLabelText(/grace/i);
+  expect(grace).toBeTruthy();
+});
+
+test("saving a new heartbeat monitor fetches and shows a copyable ping URL", async () => {
+  const createMonitor = vi.fn(async (_dto: any) => ({ id: 42 }));
+  const getHeartbeat = vi.fn(async (_id: number) => ({ token: "abc123", ping_path: "/ping/abc123" }));
+  render(() => (
+    <MonitorForm api={{ createMonitor, getHeartbeat } as any} onSaved={() => {}} onClose={() => {}} />
+  ));
+
+  fireEvent.input(screen.getByLabelText("Name"), { target: { value: "cron job" } });
+  fireEvent.click(screen.getByRole("button", { name: "Heartbeat" }));
+  fireEvent.click(screen.getByText(/create monitor/i));
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(createMonitor).toHaveBeenCalled();
+  const dto = createMonitor.mock.calls[0][0];
+  expect(dto.type).toBe("heartbeat");
+  expect(dto).toHaveProperty("heartbeat_grace_seconds");
+  expect(dto).not.toHaveProperty("ssl_check_enabled");
+  expect(dto).not.toHaveProperty("domain_check_enabled");
+
+  expect(getHeartbeat).toHaveBeenCalledWith(42);
+  const matches = await screen.findAllByText(/\/ping\//);
+  expect(matches.length).toBeGreaterThan(0);
+});
+
+test("heartbeat monitor: notifications show heartbeat_missed (not down) and emits exact triggers", async () => {
+  const getChannels = vi.fn(async () => [{ id: 9, name: "Pager", type: "webhook" }]);
+  const createMonitor = vi.fn(async (_dto: any) => ({ id: 55 }));
+  const getHeartbeat = vi.fn(async (_id: number) => ({ token: "t", ping_path: "/ping/t" }));
+  const setMonitorNotifications = vi.fn(async (_id: number, _list: any) => ({ ok: true }));
+  render(() => (
+    <MonitorForm
+      api={{ getChannels, createMonitor, getHeartbeat, setMonitorNotifications } as any}
+      onSaved={() => {}}
+      onClose={() => {}}
+    />
+  ));
+
+  fireEvent.input(screen.getByLabelText("Name"), { target: { value: "cron job" } });
+  fireEvent.click(screen.getByRole("button", { name: "Heartbeat" }));
+
+  await screen.findByText("Pager");
+  fireEvent.click(screen.getByLabelText("Pager"));
+
+  expect(screen.queryByLabelText(/^down$/i)).toBeNull();
+  const hbMissed = screen.getByLabelText(/heartbeat missed/i) as HTMLInputElement;
+  expect(hbMissed.checked).toBe(true);
+
+  fireEvent.click(screen.getByText(/create monitor/i));
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(setMonitorNotifications).toHaveBeenCalled();
+  const triggers = setMonitorNotifications.mock.calls[0][1][0].triggers;
+  expect(triggers).toEqual(["heartbeat_missed", "recovered"]);
+});
+
 test("attaching a channel with ssl_expiring checked sends ssl_expiring in triggers", async () => {
   const getChannels = vi.fn(async () => [{ id: 7, name: "Hook", type: "webhook" }]);
   const createMonitor = vi.fn(async (_dto: any) => ({ id: 10 }));

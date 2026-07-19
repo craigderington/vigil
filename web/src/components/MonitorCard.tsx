@@ -25,6 +25,21 @@ function statusClass(monitor: any): string {
   return "unknown";
 }
 
+/** Humane relative-time string from an epoch-seconds timestamp — used for
+ *  a heartbeat monitor's "last ping" in place of the response-time slot. */
+function relativeFrom(epochSeconds: number | null | undefined): string {
+  if (epochSeconds == null) return "—";
+  const deltaMs = Date.now() - epochSeconds * 1000;
+  const s = Math.max(0, Math.round(deltaMs / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 const MonitorCard: Component<MonitorCardProps> = (props) => {
   const [menuOpen, setMenuOpen] = createSignal(false);
 
@@ -119,9 +134,16 @@ const MonitorCard: Component<MonitorCardProps> = (props) => {
 
       <div class="card-metrics">
         <span class="card-response mono">
-          <Show when={responseMs() != null} fallback="—">
-            {Math.round(responseMs() as number)}
-            <span class="unit">ms</span>
+          <Show
+            when={props.monitor.type === "heartbeat"}
+            fallback={
+              <Show when={responseMs() != null} fallback="—">
+                {Math.round(responseMs() as number)}
+                <span class="unit">ms</span>
+              </Show>
+            }
+          >
+            {relativeFrom(props.monitor.last_ping_at)}
           </Show>
         </span>
       </div>

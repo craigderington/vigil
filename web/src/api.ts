@@ -250,3 +250,22 @@ export function getDomain(id: number): Promise<DomainInfo | null> {
 export function refreshDomain(id: number): Promise<DomainInfo | null> {
   return fetch(`/api/monitors/${id}/refresh-domain`, { method: "POST" }).then((r) => json(r));
 }
+
+/** A heartbeat monitor's push-ping capability token (§9/§10). This is the
+ *  ONLY place the token is ever exposed — `Monitor.heartbeat_token` is
+ *  `#[serde(skip_serializing)]` on the backend, so list/get/create/update
+ *  responses never carry it. */
+export interface HeartbeatInfo {
+  token: string;
+  ping_path: string;
+}
+
+export function getHeartbeat(id: number): Promise<HeartbeatInfo> {
+  return fetch(`/api/monitors/${id}/heartbeat`).then((r) => json(r));
+}
+
+/** Builds the absolute, copyable ping URL from a `ping_path` (e.g.
+ *  `/ping/<token>`) returned by `getHeartbeat`. */
+export function pingUrl(path: string): string {
+  return `${window.location.origin}${path}`;
+}

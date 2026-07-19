@@ -1,4 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, onMount, Show, type Component } from "solid-js";
+import { pingUrl } from "../api";
+import type { HeartbeatInfo } from "../api";
 
 /**
  * Right-side Add/Edit monitor panel (Task 17). `api` is injected as a prop
@@ -21,6 +23,7 @@ const MONITOR_TYPES: { label: string; value: string }[] = [
   { label: "Ping", value: "ping" },
   { label: "DNS", value: "dns" },
   { label: "SSL", value: "ssl" },
+  { label: "Heartbeat", value: "heartbeat" },
 ];
 
 const DNS_RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS"];
@@ -83,22 +86,12 @@ function textToDaysJson(text: string): string {
 type NotifRow = {
   attached: boolean;
   down: boolean;
+  heartbeat_missed: boolean;
   recovered: boolean;
   ssl_expiring: boolean;
   ssl_invalid: boolean;
   domain_expiring: boolean;
 };
-
-const DEFAULT_NOTIF_ROW: NotifRow = {
-  attached: false,
-  down: true,
-  recovered: true,
-  ssl_expiring: false,
-  ssl_invalid: false,
-  domain_expiring: false,
-};
-
-const DEFAULT_NOTIF_ROW_ATTACHED: NotifRow = { ...DEFAULT_NOTIF_ROW, attached: true };
 
 const MonitorForm: Component<MonitorFormProps> = (props) => {
   const isEdit = () => props.monitor != null;
@@ -166,6 +159,14 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
     props.monitor?.retry_interval_seconds ?? 30,
   );
 
+  // Heartbeat (P4 §3) — how long past `interval_seconds` a missed ping is
+  // tolerated before the reaper drives the monitor DOWN. Confirmation/
+  // recovery thresholds don't apply to a push monitor (backend forces them
+  // to 1 regardless — §5), so their inputs are hidden for this type instead.
+  const [graceSeconds, setGraceSeconds] = createSignal<number>(
+    props.monitor?.heartbeat_grace_seconds ?? 60,
+  );
+
   const [expectedCodes, setExpectedCodes] = createSignal(
     props.monitor?.expected_status_codes ?? "200-299",
   );
@@ -184,13 +185,45 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   const [channels, setChannels] = createSignal<any[]>([]);
   const [notifState, setNotifState] = createSignal<Record<number, NotifRow>>({});
 
+  // A heartbeat channel row defaults to `heartbeat_missed` in place of
+  // `down` (there's no probe-driven "down" trigger for a push monitor —
+  // §5/§7); every other type keeps the P3 defaults. Reads `type()` at
+  // call-time rather than being a module-level const so it responds to the
+  // type chip even after channels have already loaded.
+  function defaultNotifRow(attached: boolean): NotifRow {
+    const isHeartbeat = type() === "heartbeat";
+    return {
+      attached,
+      down: !isHeartbeat,
+      heartbeat_missed: isHeartbeat,
+      recovered: true,
+      ssl_expiring: false,
+      ssl_invalid: false,
+      domain_expiring: false,
+    };
+  }
+
   const [testing, setTesting] = createSignal(false);
   const [testResult, setTestResult] = createSignal<any>(null);
   const [saving, setSaving] = createSignal(false);
   const [saveError, setSaveError] = createSignal<string | null>(null);
+  // Set only right after creating a NEW heartbeat monitor — its ping URL
+  // is shown in place of the normal footer actions until the user
+  // dismisses it (`Done`), since the token is only ever available from
+  // this one dedicated endpoint (never on the Monitor object itself).
+  const [heartbeatInfo, setHeartbeatInfo] = createSignal<HeartbeatInfo | null>(null);
+
+  // Once a new heartbeat's ping URL is showing, the monitor is already
+  // saved — every dismissal path (✕, Escape, backdrop click, "Done") must
+  // trigger onSaved() (store refresh) rather than a plain onClose(), same
+  // as clicking "Done" does.
+  function dismiss() {
+    if (heartbeatInfo()) props.onSaved();
+    else props.onClose();
+  }
 
   function onKeyDown(e: KeyboardEvent) {
-    if (e.key === "Escape") props.onClose();
+    if (e.key === "Escape") dismiss();
   }
   onMount(() => document.addEventListener("keydown", onKeyDown));
   onCleanup(() => document.removeEventListener("keydown", onKeyDown));
@@ -207,7 +240,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
 
         const initial: Record<number, NotifRow> = {};
         for (const c of list) {
-          initial[c.id] = { ...DEFAULT_NOTIF_ROW };
+          initial[c.id] = defaultNotifRow(false);
         }
 
         if (props.monitor?.id != null) {
@@ -216,6 +249,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
             initial[item.channel_id] = {
               attached: true,
               down: item.triggers.includes("down"),
+              heartbeat_missed: item.triggers.includes("heartbeat_missed"),
               recovered: item.triggers.includes("recovered"),
               ssl_expiring: item.triggers.includes("ssl_expiring"),
               ssl_invalid: item.triggers.includes("ssl_invalid"),
@@ -243,16 +277,16 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   function toggleAttached(channelId: number) {
     setNotifState((s) => ({
       ...s,
-      [channelId]: { ...(s[channelId] ?? DEFAULT_NOTIF_ROW), attached: !s[channelId]?.attached },
+      [channelId]: { ...(s[channelId] ?? defaultNotifRow(false)), attached: !s[channelId]?.attached },
     }));
   }
   function toggleTrigger(
     channelId: number,
-    trigger: "down" | "recovered" | "ssl_expiring" | "ssl_invalid" | "domain_expiring",
+    trigger: "down" | "heartbeat_missed" | "recovered" | "ssl_expiring" | "ssl_invalid" | "domain_expiring",
   ) {
     setNotifState((s) => ({
       ...s,
-      [channelId]: { ...(s[channelId] ?? DEFAULT_NOTIF_ROW_ATTACHED), [trigger]: !s[channelId]?.[trigger] },
+      [channelId]: { ...(s[channelId] ?? defaultNotifRow(true)), [trigger]: !s[channelId]?.[trigger] },
     }));
   }
 
@@ -263,6 +297,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
         channel_id: Number(id),
         triggers: [
           ...(v.down ? ["down"] : []),
+          ...(v.heartbeat_missed ? ["heartbeat_missed"] : []),
           ...(v.recovered ? ["recovered"] : []),
           ...(v.ssl_expiring ? ["ssl_expiring"] : []),
           ...(v.ssl_invalid ? ["ssl_invalid"] : []),
@@ -286,6 +321,17 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
       recovery_threshold: Math.max(1, recoveryThreshold()),
       retry_interval_seconds: Math.max(1, retryInterval()),
     };
+
+    // Heartbeat is a push monitor: no probe target, no confirmation cadence
+    // (backend forces confirmation/recovery to 1 regardless — §5), and
+    // ssl_check_enabled/domain_check_enabled are outright rejected by the
+    // backend for this type, so they're never appended here (returning
+    // early rather than sending explicit `false`s keeps the DTO minimal and
+    // matches what the backend actually validates against).
+    if (t === "heartbeat") {
+      dto.heartbeat_grace_seconds = Math.max(1, graceSeconds());
+      return dto;
+    }
 
     if (isHttpLike()) {
       const rows = headerRows().filter((r) => r.key.trim() !== "");
@@ -361,6 +407,20 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
       if (id != null) {
         await props.api.setMonitorNotifications?.(id, selectedNotifications());
       }
+
+      // A brand-new heartbeat's ping URL only ever exists behind this one
+      // dedicated endpoint (never on the Monitor object itself — §9/§10),
+      // so this is the only chance the user gets to see/copy it without
+      // hunting for it later in the detail panel's HeartbeatCard. Keep the
+      // form open to show it instead of closing via `onSaved()`.
+      if (!isEdit() && type() === "heartbeat" && id != null) {
+        const hb = await props.api.getHeartbeat?.(id);
+        if (hb) {
+          setHeartbeatInfo(hb);
+          return;
+        }
+      }
+
       props.onSaved();
     } catch (e: any) {
       setSaveError(e?.message ?? "Failed to save monitor");
@@ -369,8 +429,18 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
     }
   }
 
+  async function handleCopyPingUrl() {
+    const hb = heartbeatInfo();
+    if (!hb) return;
+    try {
+      await navigator.clipboard.writeText(pingUrl(hb.ping_path));
+    } catch {
+      // clipboard API may be unavailable (e.g. insecure context) — no-op
+    }
+  }
+
   return (
-    <div class="detail-backdrop" onClick={props.onClose}>
+    <div class="detail-backdrop" onClick={dismiss}>
       <div
         class="detail-panel"
         role="dialog"
@@ -381,7 +451,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
         <div class="detail-header">
           <div class="detail-header-top">
             <h2 class="detail-name">{isEdit() ? "Edit monitor" : "Add monitor"}</h2>
-            <button type="button" class="detail-close" aria-label="Close" onClick={props.onClose}>
+            <button type="button" class="detail-close" aria-label="Close" onClick={dismiss}>
               &#10005;
             </button>
           </div>
@@ -570,26 +640,28 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
                 onInput={(e) => setTimeoutSeconds(Number(e.currentTarget.value) || 1)}
               />
             </div>
-            <div class="form-field">
-              <label for="mf-confirmation">Confirmation threshold</label>
-              <input
-                id="mf-confirmation"
-                type="number"
-                min={1}
-                value={confirmationThreshold()}
-                onInput={(e) => setConfirmationThreshold(Number(e.currentTarget.value) || 1)}
-              />
-            </div>
-            <div class="form-field">
-              <label for="mf-recovery">Recovery threshold</label>
-              <input
-                id="mf-recovery"
-                type="number"
-                min={1}
-                value={recoveryThreshold()}
-                onInput={(e) => setRecoveryThreshold(Number(e.currentTarget.value) || 1)}
-              />
-            </div>
+            <Show when={type() !== "heartbeat"}>
+              <div class="form-field">
+                <label for="mf-confirmation">Confirmation threshold</label>
+                <input
+                  id="mf-confirmation"
+                  type="number"
+                  min={1}
+                  value={confirmationThreshold()}
+                  onInput={(e) => setConfirmationThreshold(Number(e.currentTarget.value) || 1)}
+                />
+              </div>
+              <div class="form-field">
+                <label for="mf-recovery">Recovery threshold</label>
+                <input
+                  id="mf-recovery"
+                  type="number"
+                  min={1}
+                  value={recoveryThreshold()}
+                  onInput={(e) => setRecoveryThreshold(Number(e.currentTarget.value) || 1)}
+                />
+              </div>
+            </Show>
             <div class="form-field">
               <label for="mf-retry">Retry interval (seconds)</label>
               <input
@@ -600,6 +672,18 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
                 onInput={(e) => setRetryInterval(Number(e.currentTarget.value) || 1)}
               />
             </div>
+            <Show when={type() === "heartbeat"}>
+              <div class="form-field">
+                <label for="mf-grace">Grace period (seconds)</label>
+                <input
+                  id="mf-grace"
+                  type="number"
+                  min={1}
+                  value={graceSeconds()}
+                  onInput={(e) => setGraceSeconds(Math.max(1, Number(e.currentTarget.value) || 1))}
+                />
+              </div>
+            </Show>
           </section>
 
           <Show when={isHttpLike()}>
@@ -705,56 +789,58 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
             </section>
           </Show>
 
-          <section class="form-section">
-            <h3 class="form-section-title">Certificate & Domain</h3>
-            <label class="form-checkbox">
-              <input
-                type="checkbox"
-                checked={type() === "ssl" ? true : sslCheckEnabled()}
-                disabled={type() === "ssl" || !sslAllowed()}
-                onChange={(e) => setSslCheckEnabled(e.currentTarget.checked)}
-              />
-              Enable SSL certificate check
-            </label>
-            <Show when={type() === "ssl" || sslCheckEnabled()}>
-              <div class="form-field">
-                <label for="mf-ssl-alert-days">SSL alert days (comma-separated)</label>
+          <Show when={type() !== "heartbeat"}>
+            <section class="form-section">
+              <h3 class="form-section-title">Certificate & Domain</h3>
+              <label class="form-checkbox">
                 <input
-                  id="mf-ssl-alert-days"
-                  type="text"
-                  value={sslAlertDays()}
-                  onInput={(e) => setSslAlertDays(e.currentTarget.value)}
+                  type="checkbox"
+                  checked={type() === "ssl" ? true : sslCheckEnabled()}
+                  disabled={type() === "ssl" || !sslAllowed()}
+                  onChange={(e) => setSslCheckEnabled(e.currentTarget.checked)}
                 />
-              </div>
-            </Show>
+                Enable SSL certificate check
+              </label>
+              <Show when={type() === "ssl" || sslCheckEnabled()}>
+                <div class="form-field">
+                  <label for="mf-ssl-alert-days">SSL alert days (comma-separated)</label>
+                  <input
+                    id="mf-ssl-alert-days"
+                    type="text"
+                    value={sslAlertDays()}
+                    onInput={(e) => setSslAlertDays(e.currentTarget.value)}
+                  />
+                </div>
+              </Show>
 
-            <label class="form-checkbox">
-              <input
-                type="checkbox"
-                checked={domainCheckEnabled()}
-                onChange={(e) => setDomainCheckEnabled(e.currentTarget.checked)}
-              />
-              Enable domain expiry check
-            </label>
-            <Show when={domainCheckEnabled()}>
-              <div class="form-field">
-                <label for="mf-domain-alert-days">Domain alert days (comma-separated)</label>
+              <label class="form-checkbox">
                 <input
-                  id="mf-domain-alert-days"
-                  type="text"
-                  value={domainAlertDays()}
-                  onInput={(e) => setDomainAlertDays(e.currentTarget.value)}
+                  type="checkbox"
+                  checked={domainCheckEnabled()}
+                  onChange={(e) => setDomainCheckEnabled(e.currentTarget.checked)}
                 />
-              </div>
-            </Show>
-          </section>
+                Enable domain expiry check
+              </label>
+              <Show when={domainCheckEnabled()}>
+                <div class="form-field">
+                  <label for="mf-domain-alert-days">Domain alert days (comma-separated)</label>
+                  <input
+                    id="mf-domain-alert-days"
+                    type="text"
+                    value={domainAlertDays()}
+                    onInput={(e) => setDomainAlertDays(e.currentTarget.value)}
+                  />
+                </div>
+              </Show>
+            </section>
+          </Show>
 
           <Show when={channels().length > 0}>
             <section class="form-section">
               <h3 class="form-section-title">Notifications</h3>
               <For each={channels()}>
                 {(c) => {
-                  const row = () => notifState()[c.id] ?? DEFAULT_NOTIF_ROW;
+                  const row = () => notifState()[c.id] ?? defaultNotifRow(false);
                   return (
                     <div class="notif-row">
                       <label class="form-checkbox">
@@ -762,14 +848,26 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
                         {c.name}
                       </label>
                       <Show when={row().attached}>
-                        <label class="form-checkbox inline">
-                          <input
-                            type="checkbox"
-                            checked={row().down}
-                            onChange={() => toggleTrigger(c.id, "down")}
-                          />
-                          down
-                        </label>
+                        <Show when={type() !== "heartbeat"}>
+                          <label class="form-checkbox inline">
+                            <input
+                              type="checkbox"
+                              checked={row().down}
+                              onChange={() => toggleTrigger(c.id, "down")}
+                            />
+                            down
+                          </label>
+                        </Show>
+                        <Show when={type() === "heartbeat"}>
+                          <label class="form-checkbox inline">
+                            <input
+                              type="checkbox"
+                              checked={row().heartbeat_missed}
+                              onChange={() => toggleTrigger(c.id, "heartbeat_missed")}
+                            />
+                            heartbeat missed
+                          </label>
+                        </Show>
                         <label class="form-checkbox inline">
                           <input
                             type="checkbox"
@@ -810,30 +908,55 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
             </section>
           </Show>
 
-          <div class="detail-actions">
-            <button type="button" class="btn-ghost" disabled={testing()} onClick={handleTestCheck}>
-              Test check
-            </button>
-            <button type="button" class="btn-accent" disabled={saving()} onClick={handleSave}>
-              {isEdit() ? "Save changes" : "Create monitor"}
-            </button>
-            <button type="button" class="btn-ghost" onClick={props.onClose}>
-              Close
-            </button>
-          </div>
-
-          <Show when={testResult()}>
-            <div class="test-result mono">
-              {testResult()?.ok ? "OK" : "Failed"} · status {testResult()?.status_code ?? "—"} ·{" "}
-              {testResult()?.response_time_ms ?? "—"}ms
-              <Show when={testResult()?.error_message}>
-                <div class="test-result-error">{testResult()?.error_message}</div>
+          <Show
+            when={!heartbeatInfo()}
+            fallback={
+              <>
+                <section class="form-section">
+                  <h3 class="form-section-title">Ping URL</h3>
+                  <div class="test-result mono">
+                    {pingUrl(heartbeatInfo()!.ping_path)}
+                    <button type="button" class="btn-link" onClick={handleCopyPingUrl}>
+                      Copy
+                    </button>
+                  </div>
+                  <div class="test-result mono">curl -fsS {pingUrl(heartbeatInfo()!.ping_path)}</div>
+                </section>
+                <div class="detail-actions">
+                  <button type="button" class="btn-accent" onClick={dismiss}>
+                    Done
+                  </button>
+                </div>
+              </>
+            }
+          >
+            <div class="detail-actions">
+              <Show when={type() !== "heartbeat"}>
+                <button type="button" class="btn-ghost" disabled={testing()} onClick={handleTestCheck}>
+                  Test check
+                </button>
               </Show>
+              <button type="button" class="btn-accent" disabled={saving()} onClick={handleSave}>
+                {isEdit() ? "Save changes" : "Create monitor"}
+              </button>
+              <button type="button" class="btn-ghost" onClick={props.onClose}>
+                Close
+              </button>
             </div>
-          </Show>
 
-          <Show when={saveError()}>
-            <div class="test-result-error">{saveError()}</div>
+            <Show when={testResult()}>
+              <div class="test-result mono">
+                {testResult()?.ok ? "OK" : "Failed"} · status {testResult()?.status_code ?? "—"} ·{" "}
+                {testResult()?.response_time_ms ?? "—"}ms
+                <Show when={testResult()?.error_message}>
+                  <div class="test-result-error">{testResult()?.error_message}</div>
+                </Show>
+              </div>
+            </Show>
+
+            <Show when={saveError()}>
+              <div class="test-result-error">{saveError()}</div>
+            </Show>
           </Show>
         </div>
       </div>
