@@ -105,7 +105,15 @@ pub async fn eval_once(state: &AppState, prev: &mut HashSet<i64>) {
 /// live driver behind the frontend's MAINTENANCE pill (Task 7), since
 /// maintenance is a client-side overlay rather than a monitor `status`.
 pub async fn run(state: AppState) {
-    let mut prev: HashSet<i64> = HashSet::new();
+    // Seed from the live in-maintenance set rather than an empty one. Windows
+    // already active at boot are reflected in every fresh SSE `Snapshot`
+    // (`maintenance_ids`), so an empty seed would (a) re-emit a redundant
+    // enter delta for each on the first tick and (b) — worse — MISS the exit
+    // delta for a boot-active window that ends within the first `tick`,
+    // leaving a client that connected in that gap stuck showing a stale
+    // MAINTENANCE pill until its next reconnect. Recording the boot set here
+    // means the first membership change we publish is a real one.
+    let mut prev: HashSet<i64> = monitors_in_maintenance(&state.db).await.into_iter().collect();
     loop {
         let tick = settings_store::maintenance_tick_seconds(&state.db).await;
         tokio::time::sleep(Duration::from_secs(tick.max(1) as u64)).await;

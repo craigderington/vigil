@@ -118,6 +118,59 @@ async fn eval_once_publishes_enter_then_exit_and_updates_prev() {
     );
 }
 
+/// Regression for the boot-race the whole-branch review flagged: `run` seeds
+/// `prev` from the live in-maintenance set BEFORE its first sleep/tick, not
+/// from an empty set. This reproduces what `run` now does — seed `prev`, then
+/// (a) run a pass with the window STILL active and (b) run a pass after it
+/// ends — asserting NO spurious enter on (a) and a real EXIT on (b), so a
+/// client that connected while a boot-active window was live still clears its
+/// stale MAINTENANCE pill.
+#[tokio::test]
+async fn seeded_prev_suppresses_boot_enter_but_still_emits_exit() {
+    let env = test_state().await;
+    let n = now_epoch();
+    let mid = seed_monitor(&env.state.db).await;
+    let wid = insert_active_window(&env.state.db, mid, n - 300, n + 300).await;
+
+    // Mirror `run`'s boot seed: prev starts from the live in-maintenance set.
+    let mut prev: HashSet<i64> =
+        vigil::maintenance_windows::monitors_in_maintenance(&env.state.db)
+            .await
+            .into_iter()
+            .collect();
+    assert!(prev.contains(&mid), "seed must capture the boot-active window");
+
+    let mut rx = env.state.bus.subscribe();
+
+    // First tick, window STILL active: membership is unchanged from the seed,
+    // so NO enter delta (this is the enter-storm the seed exists to prevent).
+    vigil::maintenance_windows::eval_once(&env.state, &mut prev).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "seeded prev must not re-emit an enter for a boot-active window"
+    );
+
+    // End the window: the next tick must publish the EXIT.
+    sqlx::query("UPDATE maintenance_windows SET is_active = 0 WHERE id = ?")
+        .bind(wid)
+        .execute(&env.state.db)
+        .await
+        .unwrap();
+    vigil::maintenance_windows::eval_once(&env.state, &mut prev).await;
+    match rx.try_recv().expect("expected an exit MaintenanceChanged event") {
+        Event::MaintenanceChanged { id, in_maintenance } => {
+            assert_eq!(id, mid);
+            assert!(!in_maintenance, "boot-active window ending must publish an EXIT");
+        }
+        other => panic!("expected Event::MaintenanceChanged, got {other:?}"),
+    }
+    assert!(!prev.contains(&mid), "exited monitor must be removed from prev");
+    assert!(
+        rx.try_recv().is_err(),
+        "no further events after the single exit"
+    );
+}
+
 #[tokio::test]
 async fn monitors_in_maintenance_empty_when_no_active_windows() {
     let env = test_state().await;
