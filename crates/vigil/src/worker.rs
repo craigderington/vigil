@@ -80,7 +80,7 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
     // On an apply_result error, don't drop the monitor from the schedule —
     // treat it as "retry soon" (use_retry_interval = true) rather than
     // silently returning without ever rescheduling it.
-    let use_retry_interval = match engine::apply_result(state, &m, &out).await {
+    let use_retry_interval = match engine::apply_result(state, &m, &out, state.anchor.current().await).await {
         Ok(a) => a.use_retry_interval,
         Err(e) => {
             tracing::error!(monitor_id, error = %e, "apply_result failed; retrying soon");

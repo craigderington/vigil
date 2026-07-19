@@ -2,7 +2,7 @@ mod common; use common::*; use vigil::models::*;
 async fn run_once(state:&vigil::app::AppState, m:&Monitor, ok:bool) -> Monitor {
     let out = ProbeOutcome{ ok, response_time_ms:Some(5), status_code:Some(if ok{200}else{503}),
         error_message:None, resolved_ip:None, cause: if ok{None}else{Some(Cause::Status)} };
-    vigil::engine::apply_result(state, m, &out).await.unwrap();
+    vigil::engine::apply_result(state, m, &out, state.anchor.current().await).await.unwrap();
     sqlx::query_as("SELECT * FROM monitors WHERE id=?").bind(m.id).fetch_one(&state.db).await.unwrap()
 }
 #[tokio::test] async fn down_then_recover_opens_and_closes_incident() {
@@ -54,7 +54,7 @@ async fn offline_suppresses_alerts_and_keeps_incident_open() {
         resolved_ip: None,
         cause: Some(Cause::Status),
     };
-    let ao = vigil::engine::apply_result(&env.state, &m, &out).await.unwrap(); // must be Ok
+    let ao = vigil::engine::apply_result(&env.state, &m, &out, Connectivity::Online).await.unwrap(); // must be Ok
     assert!(ao.incident_id.is_some());
     // drain events, assert a MonitorUpdated with status Down was emitted
     let mut saw_updated = false;
