@@ -605,7 +605,25 @@ pub async fn stats(
     .await
     .map_err(db_err)?;
 
-    let u = uptime::compute(&spans, window_start, ts, had_any_check);
+    // Heartbeats never write `checks` rows (they're ping/reaper-driven, not
+    // probe-driven), so `had_any_check` alone would show a heartbeat's
+    // uptime as "no data" even while it's DOWN with a recorded incident.
+    // Special-case: an armed (ever-pinged) heartbeat's uptime is derived
+    // from incidents instead. A never-pinged heartbeat (`armed == false`)
+    // stays gated on `had_any_check` (false) so it still reports
+    // `uptime_pct: None`, matching the "waiting" UI.
+    let hb_row: Option<(String, Option<i64>)> =
+        sqlx::query_as("SELECT type, last_ping_at FROM monitors WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_err)?;
+    let (is_heartbeat, armed) = match &hb_row {
+        Some((r#type, last_ping_at)) => (r#type == "heartbeat", last_ping_at.is_some()),
+        None => (false, false),
+    };
+
+    let u = uptime::compute(&spans, window_start, ts, had_any_check || (is_heartbeat && armed));
 
     // 24h/7d: a straight average over raw `checks` is cheap and precise
     // enough. 30d/90d: raw checks that old may already be pruned (retention
@@ -771,6 +789,27 @@ pub async fn bars(
 ) -> ApiResult<Vec<BarRow>> {
     let days = q.days.unwrap_or(90).clamp(1, 90);
 
+    // Heartbeats never write `checks` rows or roll up into
+    // `check_aggregates_daily` — see the `stats` handler above for the same
+    // special-case. `first_active_day` is the earliest UTC day this
+    // heartbeat could plausibly have signal for (created, or first armed by
+    // a ping if that's earlier) — a String (not an epoch) because the whole
+    // bars pipeline compares UTC day strings (`rollup::day_str`).
+    let hb_row: Option<(String, Option<i64>, i64)> =
+        sqlx::query_as("SELECT type, last_ping_at, created_at FROM monitors WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(db_err)?;
+    let (is_heartbeat, armed, first_active_day) = match &hb_row {
+        Some((r#type, last_ping_at, created_at)) => {
+            let created_at = *created_at;
+            let earliest = created_at.min(last_ping_at.unwrap_or(created_at));
+            (r#type == "heartbeat", last_ping_at.is_some(), crate::rollup::day_str(earliest))
+        }
+        None => (false, false, String::new()),
+    };
+
     let retention = crate::settings_store::retention_days(&state.db).await;
     crate::rollup::ensure_aggregates(&state.db, id, retention)
         .await
@@ -841,9 +880,18 @@ pub async fn bars(
         let incidents =
             all_spans.iter().filter(|s| s.start >= ds && s.start < de).count() as i64;
 
-        let has_data = agg_days.contains(&day)
-            || (ds >= retention_floor && check_days.contains(&day))
-            || !day_spans.is_empty();
+        // Heartbeat uptime is incident-derived, not rollup-derived (spec
+        // §11 / O2): a heartbeat never has rollup/raw-check signal, so the
+        // non-heartbeat expression below would always read "no data" even
+        // for an armed, healthy heartbeat. Once armed and past its
+        // `first_active_day`, every day in range is real signal.
+        let has_data = if is_heartbeat {
+            armed && day >= first_active_day
+        } else {
+            agg_days.contains(&day)
+                || (ds >= retention_floor && check_days.contains(&day))
+                || !day_spans.is_empty()
+        };
 
         out.push(BarRow {
             day,
