@@ -9,6 +9,14 @@
 //! UPDATE can never be raced into a false incident. Heartbeats aren't
 //! anchor-gated — a missed ping is real signal regardless of the local
 //! connection's state.
+//!
+//! `reap_one_respects_fresh_db_row_over_stale_snapshot` below is the actual
+//! regression test for that SELECT-to-UPDATE race: it calls the (now `pub`)
+//! `reap_one` directly with a deliberately stale in-memory snapshot against
+//! a fresh db row, bypassing `reap_once`'s due-SELECT entirely so only the
+//! UPDATE's own staleness predicate can prevent a false DOWN.
+//! `fresh_row_filtered_at_due_select` is a distinct, narrower case (a fresh
+//! row never matches the due-SELECT in the first place).
 
 mod common;
 use common::*;
@@ -174,12 +182,24 @@ async fn never_pinged_not_reaped() {
     );
 }
 
+/// NOTE on naming: this covers the due-SELECT filter case, not the
+/// UPDATE-vs-race guard. Because `last_ping_at` here is already fresh
+/// *before* `reap_once` even runs its SELECT, the row never matches the
+/// due-query's own staleness predicate — `reap_one` is never invoked for
+/// this monitor at all. This test would still pass even if the DOWN
+/// UPDATE's staleness predicate in `reap_one` were deleted entirely; it
+/// only proves the SELECT's filter works. The actual reap-vs-ping race
+/// (a snapshot going stale *between* the SELECT and the UPDATE) is covered
+/// separately by `reap_one_respects_fresh_db_row_over_stale_snapshot` below,
+/// which calls `reap_one` directly with a stale snapshot against a fresh db
+/// row.
 #[tokio::test]
-async fn fresh_ping_mid_reap_not_downed() {
+async fn fresh_row_filtered_at_due_select() {
     let env = test_state().await;
     let n = now_epoch();
     // status='up' but last_ping_at is essentially "now" — not stale at all,
-    // simulating a ping that landed between the due-SELECT and the reap.
+    // so the due-query's own predicate excludes this row before reap_one is
+    // ever called.
     let mid = seed_heartbeat(&env.state.db, "up", false, 60, 60, Some(n), n - 1000).await;
 
     vigil::heartbeat::reap_once(&env.state).await.unwrap();
@@ -189,14 +209,70 @@ async fn fresh_ping_mid_reap_not_downed() {
         .fetch_one(&env.state.db)
         .await
         .unwrap();
-    assert_eq!(status, "up", "a fresh ping must prevent the reap (rows_affected must be 0)");
+    assert_eq!(status, "up", "a fresh row must be filtered out at the due-SELECT");
 
     let incident_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM incidents WHERE monitor_id=?")
         .bind(mid)
         .fetch_one(&env.state.db)
         .await
         .unwrap();
-    assert_eq!(incident_count, 0, "no incident may be opened when the staleness predicate no longer holds");
+    assert_eq!(incident_count, 0, "no incident may be opened for a row the due-SELECT never selected");
+}
+
+/// The genuine reap-vs-ping race regression test. `fresh_row_filtered_at_due_select`
+/// above only proves that a fresh row is filtered out at `reap_once`'s
+/// due-SELECT — `reap_one` is never even invoked for it, so that test would
+/// still pass if the DOWN `UPDATE`'s staleness predicate were deleted
+/// entirely. This test instead calls `heartbeat::reap_one` (now `pub`)
+/// directly with a deliberately STALE in-memory `Monitor` snapshot while the
+/// DB row underneath is FRESH — exactly what happens when a real ping lands
+/// via `record_ping` between `reap_once`'s SELECT and a queued `reap_one`
+/// call for that same monitor. Only the UPDATE's own fresh-read predicate
+/// (not the SELECT, which is bypassed here) can prevent the false DOWN.
+#[tokio::test]
+async fn reap_one_respects_fresh_db_row_over_stale_snapshot() {
+    let env = test_state().await;
+    let n = now_epoch();
+
+    // interval 60 + grace 60 = 120s window. Seed the DB row as FRESH — a
+    // ping just landed (last_ping_at = n, status = 'up').
+    let mid = seed_heartbeat(&env.state.db, "up", false, 60, 60, Some(n), n - 1000).await;
+
+    // Fetch the row back into a `Monitor`, then hand-corrupt the in-memory
+    // copy to look overdue (last_ping_at = n - 10_000), simulating a
+    // snapshot taken by `reap_once`'s due-SELECT *before* the ping above
+    // refreshed the DB row.
+    let mut stale_snapshot: vigil::models::Monitor =
+        sqlx::query_as("SELECT * FROM monitors WHERE id = ?")
+            .bind(mid)
+            .fetch_one(&env.state.db)
+            .await
+            .unwrap();
+    assert_eq!(stale_snapshot.last_ping_at, Some(n), "sanity: db row starts fresh");
+    stale_snapshot.last_ping_at = Some(n - 10_000);
+
+    // Call reap_one directly with the stale snapshot — reap_once's
+    // due-SELECT is bypassed entirely, so only the UPDATE's own
+    // fresh-db-read staleness predicate can save this monitor.
+    vigil::heartbeat::reap_one(&env.state, &stale_snapshot, n).await.unwrap();
+
+    let status: String = sqlx::query_scalar("SELECT status FROM monitors WHERE id=?")
+        .bind(mid)
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        status, "up",
+        "the UPDATE must re-read last_ping_at fresh from the db and refuse to reap a monitor \
+         that was actually pinged, even when handed a stale in-memory snapshot"
+    );
+
+    let incident_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM incidents WHERE monitor_id=?")
+        .bind(mid)
+        .fetch_one(&env.state.db)
+        .await
+        .unwrap();
+    assert_eq!(incident_count, 0, "no incident may be opened when the db row is actually fresh");
 }
 
 #[tokio::test]

@@ -213,10 +213,24 @@ pub async fn reap_once(state: &AppState) -> anyhow::Result<()> {
 /// is opened only when `rows_affected == 1`. Events/notifications are
 /// dispatched only after a successful `COMMIT`, and only if the monitor
 /// actually transitioned.
-async fn reap_one(state: &AppState, m: &Monitor, n: i64) -> anyhow::Result<()> {
+///
+/// `pub` for the reap-vs-ping race regression test: an integration test
+/// (`tests/heartbeat_reaper.rs`) can only call `pub` items, and exercising
+/// the race requires feeding a deliberately stale in-memory `Monitor`
+/// snapshot directly to this function (bypassing `reap_once`'s SELECT,
+/// which would otherwise filter a fresh row out before `reap_one` is ever
+/// invoked).
+pub async fn reap_one(state: &AppState, m: &Monitor, n: i64) -> anyhow::Result<()> {
     let mut conn = state.db.acquire().await?;
     let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
 
+    // Load-bearing: re-checks staleness against the FRESH db row (not the
+    // possibly-stale in-memory `m` snapshot passed in) so a ping that
+    // refreshed last_ping_at between the due-SELECT and here makes
+    // rows_affected==0 (no false incident). Do NOT drop as "redundant with
+    // the SELECT" — `reap_once`'s SELECT can only see the world as of the
+    // moment it ran; a concurrent `record_ping` between that SELECT and
+    // this UPDATE is exactly the race this predicate closes.
     let r = sqlx::query(
         "UPDATE monitors SET status='down', updated_at=?1 \
          WHERE id=?2 AND status='up' \
