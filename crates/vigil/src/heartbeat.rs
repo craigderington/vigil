@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use sqlx::Connection;
 
 use crate::app::AppState;
 use crate::engine;
@@ -51,15 +52,23 @@ fn now() -> i64 {
 pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result<()> {
     let n = now();
 
+    // A real sqlx `Transaction` guard, not a raw `BEGIN IMMEDIATE` execute:
+    // `Transaction::drop` rolls back automatically if `tx` is dropped
+    // without `commit()` (e.g. an early `?`-return below), so the
+    // IMMEDIATE write lock can never be leaked on an error path. A raw
+    // `sqlx::query("BEGIN IMMEDIATE").execute(..)` is dispatched as a plain
+    // `Command::Execute`, not `Command::Begin` — sqlx never learns a
+    // transaction is open, so `PoolConnection::drop` would NOT roll it
+    // back, leaking the lock on a pooled connection.
     let mut conn = state.db.acquire().await?;
-    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let mut tx = conn.begin_with("BEGIN IMMEDIATE").await?;
 
     // Read the pre-update status under the write lock just acquired, so no
     // concurrent writer (the reaper) can change it between this read and
     // the UPDATE below.
     let old: String = sqlx::query_scalar("SELECT status FROM monitors WHERE id = ?")
         .bind(m.id)
-        .fetch_one(&mut *conn)
+        .fetch_one(&mut *tx)
         .await?;
 
     sqlx::query(
@@ -69,7 +78,7 @@ pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result
     )
     .bind(n)
     .bind(m.id)
-    .execute(&mut *conn)
+    .execute(&mut *tx)
     .await?;
 
     // Only a `down` heartbeat can have an open incident — `pending` never
@@ -82,7 +91,7 @@ pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result
              ORDER BY started_at DESC LIMIT 1",
         )
         .bind(m.id)
-        .fetch_optional(&mut *conn)
+        .fetch_optional(&mut *tx)
         .await?;
 
         if let Some((iid, started_at)) = open {
@@ -91,13 +100,13 @@ pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result
                 .bind(n)
                 .bind(dur)
                 .bind(iid)
-                .execute(&mut *conn)
+                .execute(&mut *tx)
                 .await?;
             closed = Some((iid, dur));
         }
     }
 
-    sqlx::query("COMMIT").execute(&mut *conn).await?;
+    tx.commit().await?;
     drop(conn);
 
     // Events/notifications are side effects that happen only after a
@@ -145,20 +154,26 @@ pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result
 }
 
 /// `GET|POST /ping/:token` — the heartbeat receiver. 404 on an unknown
-/// token; otherwise records the ping and always returns 200 (a
+/// token; 500 on a genuine DB error during the token lookup (logged, so a
+/// locked-database condition doesn't masquerade as "unknown token" with no
+/// server-log trace); otherwise records the ping and always returns 200 (a
 /// `record_ping` error is logged, not surfaced to the caller — the ping
 /// itself arrived and the job shouldn't retry/fail over an internal
-/// bookkeeping error). Logs `monitor_id`, never the token.
+/// bookkeeping error). Never logs the token in any branch.
 pub async fn ping(State(state): State<AppState>, Path(token): Path<String>) -> impl IntoResponse {
-    let m: Option<Monitor> = sqlx::query_as("SELECT * FROM monitors WHERE heartbeat_token = ?")
-        .bind(&token)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+    let lookup: Result<Option<Monitor>, sqlx::Error> =
+        sqlx::query_as("SELECT * FROM monitors WHERE heartbeat_token = ?")
+            .bind(&token)
+            .fetch_optional(&state.db)
+            .await;
 
-    let Some(m) = m else {
-        return (StatusCode::NOT_FOUND, "not found");
+    let m = match lookup {
+        Ok(Some(m)) => m,
+        Ok(None) => return (StatusCode::NOT_FOUND, "not found"),
+        Err(e) => {
+            tracing::error!(error = %e, "heartbeat ping: monitor lookup failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
     };
 
     if let Err(e) = record_ping(&state, &m).await {
