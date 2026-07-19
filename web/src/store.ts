@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import { setMaintenanceIds, patchMaintenance } from "./maintenance_ids";
 
 export type StoreState = { monitors: any[]; online: boolean };
 
@@ -131,6 +132,16 @@ export function createMonitorStore() {
         return;
       }
       setCertBump((b) => applyCertBump(b, frame));
+      // Maintenance overlay (P4.2 §7/M7): a SEPARATE module-level signal,
+      // like certBump — not part of StoreState/applyEvent, since the leaf
+      // status-dot renderers need to read it without a store instance. A
+      // `snapshot` REPLACES the whole set (a resync must reset, not
+      // accumulate); `maintenance_changed` patches a single id.
+      if (frame.event === "snapshot") {
+        setMaintenanceIds(frame.data?.maintenance_ids ?? []);
+      } else if (frame.event === "maintenance_changed") {
+        patchMaintenance(frame.data.id, frame.data.in_maintenance);
+      }
       const next = applyEvent(state, frame);
       setState("online", next.online);
       setState("monitors", reconcile(next.monitors, { key: "id" }));

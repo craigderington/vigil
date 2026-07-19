@@ -1,6 +1,7 @@
 import { createMemo, createResource, createSignal, For, onCleanup, Show, type Component } from "solid-js";
 import * as api from "../api";
 import type { Stats } from "../api";
+import { displayStatus } from "../maintenance_ids";
 import UptimeBar from "./UptimeBar";
 
 export type SortCol =
@@ -43,9 +44,12 @@ const STATUS_LABEL: Record<string, string> = {
   unknown: "Unknown",
 };
 
+/** Wraps the module-level `displayStatus` (maintenance_ids.ts), which
+ *  applies the paused > maintenance > real precedence, with the same
+ *  "unrecognized status falls back to unknown" guard this local helper had
+ *  before. */
 function statusClass(monitor: any): string {
-  if (monitor.is_paused) return "paused";
-  const s = monitor.status ?? "pending";
+  const s = displayStatus({ id: monitor.id, is_paused: monitor.is_paused, status: monitor.status ?? "pending" });
   if (STATUS_LABEL[s]) return s;
   return "unknown";
 }

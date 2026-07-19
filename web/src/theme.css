@@ -45,6 +45,7 @@ button{font-family:inherit;color:inherit}
 .rail-summary .up{color:var(--up)}
 .rail-summary .down{color:var(--down)}
 .rail-summary .paused{color:var(--paused)}
+.rail-summary .maintenance{color:var(--maintenance)}
 .rail-summary .down.pulsing{animation:pulse-text 2s ease-in-out infinite}
 
 @keyframes pulse-text{0%,100%{opacity:1}50%{opacity:.55}}
@@ -136,6 +137,7 @@ button{font-family:inherit;color:inherit}
 .status-dot.pending{background:var(--pending)}
 .status-dot.unknown{background:var(--unknown)}
 .status-dot.paused{background:transparent;border:2px solid var(--paused)}
+.status-dot.maintenance{background:var(--maintenance)}
 
 @keyframes breathe-up{
   0%,100%{box-shadow:0 0 0 0 rgba(53,208,127,.55)}

@@ -1,6 +1,7 @@
 import { createMemo, createSignal, Match, Show, Switch, type Component } from "solid-js";
 import { createMonitorStore } from "./store";
 import * as api from "./api";
+import { inMaintenance } from "./maintenance_ids";
 import Rail, { type RailView } from "./components/Rail";
 import TopBar from "./components/TopBar";
 import ConnectivityBanner from "./components/ConnectivityBanner";
@@ -10,15 +11,16 @@ import DetailPanel from "./components/DetailPanel";
 import MonitorForm from "./components/MonitorForm";
 import Settings from "./components/Settings";
 import Incidents from "./components/Incidents";
+import Maintenance from "./components/Maintenance";
 
 const App: Component = () => {
   const store = createMonitorStore();
   const [query, setQuery] = createSignal("");
   const [statusFilter, setStatusFilter] = createSignal<string | null>(null);
 
-  // Top-level view. "dashboard", "settings", and "incidents" have real
-  // screens; Rail still fires onNavigate for Notifications/Maintenance so a
-  // future screen can hook in, but until then those clicks just return to
+  // Top-level view. "dashboard", "settings", "incidents", and "maintenance"
+  // have real screens; Rail still fires onNavigate for Notifications so a
+  // future screen can hook in, but until then that click just returns to
   // the dashboard grid — see Rail.tsx.
   const [view, setView] = createSignal<RailView>("dashboard");
 
@@ -26,7 +28,16 @@ const App: Component = () => {
     const q = query().trim().toLowerCase();
     const status = statusFilter();
     return store.monitors().filter((m) => {
-      if (status && m.status !== status) return false;
+      // `monitor.status` is never "maintenance" (it's a client-side overlay
+      // — see maintenance_ids.ts), so the maintenance chip can't use the
+      // plain equality check below; it would filter to zero every time.
+      if (status) {
+        if (status === "maintenance") {
+          if (!inMaintenance(m.id)) return false;
+        } else if (m.status !== status) {
+          return false;
+        }
+      }
       if (!q) return true;
       const haystack = `${m.name ?? ""} ${m.url ?? ""} ${m.host ?? ""}`.toLowerCase();
       return haystack.includes(q);
@@ -67,7 +78,9 @@ const App: Component = () => {
         monitors={store.monitors()}
         activeView={view()}
         onNavigate={(key) =>
-          setView(key === "settings" || key === "incidents" ? key : "dashboard")
+          setView(
+            key === "settings" || key === "incidents" || key === "maintenance" ? key : "dashboard",
+          )
         }
       />
       <div class="app-main">
@@ -111,6 +124,11 @@ const App: Component = () => {
           <Match when={view() === "incidents"}>
             <div class="app-content">
               <Incidents />
+            </div>
+          </Match>
+          <Match when={view() === "maintenance"}>
+            <div class="app-content">
+              <Maintenance />
             </div>
           </Match>
         </Switch>

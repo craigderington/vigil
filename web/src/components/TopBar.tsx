@@ -12,7 +12,7 @@ export interface TopBarProps {
   onLayoutChange?: (l: "grid" | "list") => void;
 }
 
-const STATUS_CHIPS = ["up", "down", "degraded", "paused"];
+const STATUS_CHIPS = ["up", "down", "degraded", "paused", "maintenance"];
 
 const TopBar: Component<TopBarProps> = (props) => {
   return (

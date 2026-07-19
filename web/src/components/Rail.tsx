@@ -1,19 +1,19 @@
 import { createMemo, type Component } from "solid-js";
+import { inMaintenance } from "../maintenance_ids";
 
-export type RailView = "dashboard" | "settings" | "incidents";
+export type RailView = "dashboard" | "settings" | "incidents" | "maintenance";
 
 export interface RailProps {
   monitors: any[];
   /** Which top-level view is active; drives `aria-current`. Defaults to "dashboard". */
   activeView?: RailView;
-  /** Fired with the clicked item's key. Items without a wired screen yet
-   * (Notifications/Maintenance) still fire so a future screen can hook in;
-   * App.tsx currently routes anything but "settings"/"incidents" back to
-   * the dashboard grid. */
-  onNavigate?: (key: RailView | "notifications" | "maintenance") => void;
+  /** Fired with the clicked item's key. Notifications has no screen yet, so
+   * it still fires so a future screen can hook in; App.tsx routes anything
+   * but "settings"/"incidents"/"maintenance" back to the dashboard grid. */
+  onNavigate?: (key: RailView | "notifications") => void;
 }
 
-const NAV_ITEMS: { icon: string; label: string; key: RailView | "notifications" | "maintenance" }[] = [
+const NAV_ITEMS: { icon: string; label: string; key: RailView | "notifications" }[] = [
   { icon: "▣", label: "Dashboard", key: "dashboard" },
   { icon: "⚠", label: "Incidents", key: "incidents" },
   { icon: "\u{1F514}", label: "Notifications", key: "notifications" },
@@ -25,13 +25,18 @@ const Rail: Component<RailProps> = (props) => {
   const summary = createMemo(() => {
     let up = 0,
       down = 0,
-      paused = 0;
+      paused = 0,
+      maintenance = 0;
     for (const m of props.monitors) {
+      // Precedence: paused > maintenance > real status (M7) — a paused
+      // monitor counts as paused even if it also falls inside an active
+      // maintenance window.
       if (m.is_paused || m.status === "paused") paused++;
+      else if (inMaintenance(m.id)) maintenance++;
       else if (m.status === "up") up++;
       else if (m.status === "down") down++;
     }
-    return { up, down, paused };
+    return { up, down, paused, maintenance };
   });
 
   return (
@@ -60,6 +65,7 @@ const Rail: Component<RailProps> = (props) => {
         <span class="stat up">{summary().up}&#9650;</span>
         <span class={`stat down ${summary().down > 0 ? "pulsing" : ""}`}>{summary().down}&#9660;</span>
         <span class="stat paused">{summary().paused}&#10074;&#10074;</span>
+        <span class="stat maintenance">{summary().maintenance}&#128736;</span>
       </div>
     </nav>
   );

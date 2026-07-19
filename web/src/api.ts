@@ -269,3 +269,78 @@ export function getHeartbeat(id: number): Promise<HeartbeatInfo> {
 export function pingUrl(path: string): string {
   return `${window.location.origin}${path}`;
 }
+
+/** `maintenance_windows` row (P4.2 §8). `target_ref` is the raw stored
+ *  column — a JSON-encoded string (`NULL` for `scope:"all"`, a JSON string
+ *  for `tag`, a JSON array of ints for `monitors`) — callers that want the
+ *  parsed value must `JSON.parse` it themselves (see `Maintenance.tsx`). */
+export interface MaintenanceWindow {
+  id: number;
+  name: string;
+  scope: string; // all|tag|monitors
+  target_ref: string | null;
+  starts_at: number;
+  ends_at: number;
+  recurrence: string | null;
+  suppress: string; // alerts|checks
+  is_active: boolean;
+  created_at: number;
+}
+
+export interface MaintenanceWindowDto {
+  name: string;
+  scope: string;
+  target_ref?: string | number[] | null;
+  starts_at: number;
+  ends_at: number;
+  recurrence?: string | null;
+  suppress: string;
+}
+
+export function listMaintenanceWindows(): Promise<MaintenanceWindow[]> {
+  return fetch("/api/maintenance-windows").then((r) => json(r));
+}
+
+export function createMaintenanceWindow(dto: Partial<MaintenanceWindowDto>): Promise<MaintenanceWindow> {
+  return fetch("/api/maintenance-windows", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(dto),
+  }).then((r) => json(r));
+}
+
+export function updateMaintenanceWindow(
+  id: number,
+  dto: Partial<MaintenanceWindowDto> & { is_active?: boolean },
+): Promise<MaintenanceWindow> {
+  return fetch(`/api/maintenance-windows/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(dto),
+  }).then((r) => json(r));
+}
+
+export function deleteMaintenanceWindow(id: number): Promise<{ ok: boolean }> {
+  return fetch(`/api/maintenance-windows/${id}`, { method: "DELETE" }).then((r) => json(r));
+}
+
+export interface MaintenancePreview {
+  affected_monitor_ids: number[];
+  active_now: boolean | null;
+}
+
+/** Body-driven scope preview (not id-keyed — the window being previewed may
+ *  not exist yet), used by the create/edit form's live "affects N". */
+export function previewMaintenanceWindow(body: {
+  scope: string;
+  target_ref?: string | number[] | null;
+  recurrence?: string | null;
+  starts_at?: number | null;
+  ends_at?: number | null;
+}): Promise<MaintenancePreview> {
+  return fetch("/api/maintenance-windows/preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((r) => json(r));
+}
