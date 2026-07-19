@@ -146,6 +146,11 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   const [intervalSeconds, setIntervalSeconds] = createSignal<number>(
     props.monitor?.interval_seconds ?? 300,
   );
+  // Global floor is 15s (§4), but the backend requires >=30s specifically
+  // for heartbeat monitors (a push interval shorter than that isn't
+  // meaningful). Read at call-time off `type()` so the custom-interval
+  // input's `min`/clamp and the DTO's clamp both track a live type switch.
+  const intervalFloor = () => (type() === "heartbeat" ? 30 : 15);
   const [timeoutSeconds, setTimeoutSeconds] = createSignal<number>(
     props.monitor?.timeout_seconds ?? 30,
   );
@@ -185,17 +190,22 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   const [channels, setChannels] = createSignal<any[]>([]);
   const [notifState, setNotifState] = createSignal<Record<number, NotifRow>>({});
 
-  // A heartbeat channel row defaults to `heartbeat_missed` in place of
-  // `down` (there's no probe-driven "down" trigger for a push monitor —
-  // §5/§7); every other type keeps the P3 defaults. Reads `type()` at
-  // call-time rather than being a module-level const so it responds to the
-  // type chip even after channels have already loaded.
+  // A freshly-attached channel defaults BOTH `down` and `heartbeat_missed`
+  // on (along with `recovered`). This row is type-agnostic by design: which
+  // of the two actually gets emitted is decided at save time in
+  // `selectedNotifications()` based on the monitor's CURRENT type, not baked
+  // in here based on whatever `type()` happened to be when the row was
+  // created. That matters because channels typically finish loading (and
+  // rows get created) before the user has clicked a type chip — if the
+  // default depended on `type()` at creation time, a channel loaded while
+  // still "http" would carry `down:true, heartbeat_missed:false` forever,
+  // even after switching to Heartbeat, silently defeating the dead-man's
+  // switch (a real monitor would emit "down" instead of "heartbeat_missed").
   function defaultNotifRow(attached: boolean): NotifRow {
-    const isHeartbeat = type() === "heartbeat";
     return {
       attached,
-      down: !isHeartbeat,
-      heartbeat_missed: isHeartbeat,
+      down: true,
+      heartbeat_missed: true,
       recovered: true,
       ssl_expiring: false,
       ssl_invalid: false,
@@ -290,19 +300,30 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
     }));
   }
 
+  // Type-aware at EMIT time (not load time — see `defaultNotifRow` above):
+  // a heartbeat monitor has no probe-driven "down" trigger, so `row.down`
+  // (which defaults true and may be stale from before a type switch) must
+  // never leak into a heartbeat's triggers, and `row.heartbeat_missed`
+  // (also defaults true) is always emitted for it instead. Non-heartbeat
+  // types never emit `heartbeat_missed` — that trigger doesn't apply there.
   function selectedNotifications(): { channel_id: number; triggers: string[] }[] {
+    const isHeartbeat = type() === "heartbeat";
     return Object.entries(notifState())
       .filter(([, v]) => v.attached)
       .map(([id, v]) => ({
         channel_id: Number(id),
-        triggers: [
-          ...(v.down ? ["down"] : []),
-          ...(v.heartbeat_missed ? ["heartbeat_missed"] : []),
-          ...(v.recovered ? ["recovered"] : []),
-          ...(v.ssl_expiring ? ["ssl_expiring"] : []),
-          ...(v.ssl_invalid ? ["ssl_invalid"] : []),
-          ...(v.domain_expiring ? ["domain_expiring"] : []),
-        ],
+        triggers: isHeartbeat
+          ? [
+              ...(v.heartbeat_missed ? ["heartbeat_missed"] : []),
+              ...(v.recovered ? ["recovered"] : []),
+            ]
+          : [
+              ...(v.down ? ["down"] : []),
+              ...(v.recovered ? ["recovered"] : []),
+              ...(v.ssl_expiring ? ["ssl_expiring"] : []),
+              ...(v.ssl_invalid ? ["ssl_invalid"] : []),
+              ...(v.domain_expiring ? ["domain_expiring"] : []),
+            ],
       }));
   }
 
@@ -315,7 +336,7 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
     const dto: Record<string, unknown> = {
       name: name(),
       type: t,
-      interval_seconds: Math.max(15, intervalSeconds()),
+      interval_seconds: Math.max(intervalFloor(), intervalSeconds()),
       timeout_seconds: Math.max(1, timeoutSeconds()),
       confirmation_threshold: Math.max(1, confirmationThreshold()),
       recovery_threshold: Math.max(1, recoveryThreshold()),
@@ -621,13 +642,15 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
               </div>
             </div>
             <div class="form-field">
-              <label for="mf-interval-custom">Custom interval (seconds, min 15)</label>
+              <label for="mf-interval-custom">Custom interval (seconds, min {intervalFloor()})</label>
               <input
                 id="mf-interval-custom"
                 type="number"
-                min={15}
+                min={intervalFloor()}
                 value={intervalSeconds()}
-                onInput={(e) => setIntervalSeconds(Math.max(15, Number(e.currentTarget.value) || 15))}
+                onInput={(e) =>
+                  setIntervalSeconds(Math.max(intervalFloor(), Number(e.currentTarget.value) || intervalFloor()))
+                }
               />
             </div>
             <div class="form-field">

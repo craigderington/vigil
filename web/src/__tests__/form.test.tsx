@@ -217,6 +217,46 @@ test("heartbeat monitor: notifications show heartbeat_missed (not down) and emit
   expect(triggers).toEqual(["heartbeat_missed", "recovered"]);
 });
 
+test("heartbeat monitor: channel row created before the type switch still emits heartbeat_missed not down (load-order)", async () => {
+  // Reproduces the load-order bug: getChannels() resolves (and the default
+  // NotifRow is created) BEFORE the user clicks the Heartbeat type chip —
+  // the realistic ordering, since the channel fetch resolves in
+  // milliseconds while the type is still "http" by default. A prior
+  // implementation baked the down/heartbeat_missed defaults in at row-
+  // creation time (based on whatever type() was THEN), so a row created
+  // while still "http" would carry down:true/heartbeat_missed:false
+  // forever, regardless of a later type switch.
+  const getChannels = vi.fn(async () => [{ id: 11, name: "LoadOrderPager", type: "webhook" }]);
+  const createMonitor = vi.fn(async (_dto: any) => ({ id: 77 }));
+  const getHeartbeat = vi.fn(async (_id: number) => ({ token: "t2", ping_path: "/ping/t2" }));
+  const setMonitorNotifications = vi.fn(async (_id: number, _list: any) => ({ ok: true }));
+  render(() => (
+    <MonitorForm
+      api={{ getChannels, createMonitor, getHeartbeat, setMonitorNotifications } as any}
+      onSaved={() => {}}
+      onClose={() => {}}
+    />
+  ));
+
+  // Await the channel load to fully resolve and land in notifState FIRST...
+  await screen.findByText("LoadOrderPager");
+
+  // ...THEN switch the type to heartbeat.
+  fireEvent.input(screen.getByLabelText("Name"), { target: { value: "cron job 2" } });
+  fireEvent.click(screen.getByRole("button", { name: "Heartbeat" }));
+
+  fireEvent.click(screen.getByLabelText("LoadOrderPager"));
+
+  fireEvent.click(screen.getByText(/create monitor/i));
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(setMonitorNotifications).toHaveBeenCalled();
+  const triggers = setMonitorNotifications.mock.calls[0][1][0].triggers;
+  expect(triggers).toEqual(["heartbeat_missed", "recovered"]);
+});
+
 test("attaching a channel with ssl_expiring checked sends ssl_expiring in triggers", async () => {
   const getChannels = vi.fn(async () => [{ id: 7, name: "Hook", type: "webhook" }]);
   const createMonitor = vi.fn(async (_dto: any) => ({ id: 10 }));
