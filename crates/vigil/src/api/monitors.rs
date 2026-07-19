@@ -405,6 +405,18 @@ pub async fn resume(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
 }
 
 pub async fn check_now(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    let r#type: Option<String> = sqlx::query_scalar("SELECT type FROM monitors WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(db_err)?;
+    if r#type.as_deref() == Some("heartbeat") {
+        // Heartbeat monitors are driven by inbound pings + the reaper, not
+        // the probe scheduler — never enqueue one.
+        return Ok(Json(
+            json!({ "ok": false, "error": "heartbeat monitors are driven by pings, not manual checks" }),
+        ));
+    }
     let _ = state.sched_tx.send(SchedCmd::CheckNow(id));
     Ok(Json(json!({ "ok": true })))
 }

@@ -68,6 +68,13 @@ impl SchedState {
         self.heap.peek().map(|Reverse((t, _))| *t)
     }
 
+    /// Whether `id` currently has a heap entry (due or not). Non-mutating —
+    /// unlike `take_due`, this does not pop/consume anything, so it's safe
+    /// to use for assertions in tests.
+    pub fn is_scheduled(&self, id: i64) -> bool {
+        self.heap.iter().any(|Reverse((_, hid))| *hid == id)
+    }
+
     /// Pop the soonest entry IF due (t <= now) and not already in-flight;
     /// mark it in-flight and return its id. Stale entries for
     /// already-in-flight ids are popped and discarded. Returns None if
@@ -116,22 +123,31 @@ impl SchedState {
     }
 }
 
-/// Re-reads a single monitor's `next_run_at`/`is_paused` from the DB and
-/// re-heaps it if still eligible. Used for `SchedCmd::Upsert` (create/edit)
-/// and after `SchedCmd::Complete` (worker finished, pick up whatever
-/// `next_run_at` it just persisted). A deleted monitor (`Ok(None)`) is
-/// simply not re-heaped; a query error is logged rather than silently
-/// dropping the monitor from the schedule.
+/// Re-reads a single monitor's `next_run_at`/`is_paused`/`type` from the DB
+/// and re-heaps it if still eligible. Used for `SchedCmd::Upsert`
+/// (create/edit/resume) and after `SchedCmd::Complete` (worker finished,
+/// pick up whatever `next_run_at` it just persisted). A deleted monitor
+/// (`Ok(None)`) is simply not re-heaped; a query error is logged rather than
+/// silently dropping the monitor from the schedule.
+///
+/// Heartbeat monitors are excluded here too — this is the single choke
+/// point every `SchedCmd::Upsert` (create/update/resume) routes through, so
+/// excluding it here is sufficient to keep a heartbeat out of the schedule
+/// no matter which of those paths triggered the reschedule.
 async fn reschedule_from_db(state: &AppState, sched: &mut SchedState, id: i64) {
-    let row: Result<Option<(Option<Ts>, bool)>, sqlx::Error> = sqlx::query_as(
-        "SELECT next_run_at, is_paused FROM monitors WHERE id = ?",
+    let row: Result<Option<(Option<Ts>, bool, String)>, sqlx::Error> = sqlx::query_as(
+        "SELECT next_run_at, is_paused, type FROM monitors WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await;
 
     match row {
-        Ok(Some((next_run_at, is_paused))) => {
+        Ok(Some((_, _, r#type))) if r#type == "heartbeat" => {
+            // Driven by inbound pings + the reaper (Tasks 5/6), never the
+            // probe scheduler.
+        }
+        Ok(Some((next_run_at, is_paused, _))) => {
             if !is_paused {
                 sched.schedule(id, next_run_at.unwrap_or(0));
             }
@@ -141,6 +157,34 @@ async fn reschedule_from_db(state: &AppState, sched: &mut SchedState, id: i64) {
         }
         Err(e) => {
             tracing::error!(monitor_id = id, error = %e, "failed to reschedule monitor from db");
+        }
+    }
+}
+
+/// Catch-up on restart: seeds `sched` with every non-paused, non-heartbeat
+/// monitor's `next_run_at` (null or in the past sorts first via
+/// `unwrap_or(0)`, so it fires as soon as the loop starts). Heartbeat
+/// monitors are excluded — they're driven by inbound pings + a reaper
+/// (Tasks 5/6), not the probe scheduler; catching one up here would let it
+/// fire through `worker::run_check` → `probe::run`'s HTTP fallback against a
+/// NULL url, producing a false DOWN that fights the ping-driven state.
+///
+/// A free function (not inlined into `run_scheduler`) so it's directly
+/// unit-testable without spinning up the full scheduler loop.
+pub async fn catch_up(db: &sqlx::SqlitePool, sched: &mut SchedState) {
+    match sqlx::query_as::<_, (i64, Option<Ts>)>(
+        "SELECT id, next_run_at FROM monitors WHERE is_paused = 0 AND type != 'heartbeat'",
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(rows) => {
+            for (id, next_run_at) in rows {
+                sched.schedule(id, next_run_at.unwrap_or(0));
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to seed scheduler from db; starting empty");
         }
     }
 }
@@ -155,23 +199,7 @@ pub async fn run_scheduler(
 ) {
     let mut sched = SchedState::new();
 
-    // Catch-up on restart: any monitor whose next_run_at is null or in the
-    // past sorts first (unwrap_or(0)) and fires as soon as the loop starts.
-    match sqlx::query_as::<_, (i64, Option<Ts>)>(
-        "SELECT id, next_run_at FROM monitors WHERE is_paused = 0",
-    )
-    .fetch_all(&state.db)
-    .await
-    {
-        Ok(rows) => {
-            for (id, next_run_at) in rows {
-                sched.schedule(id, next_run_at.unwrap_or(0));
-            }
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to seed scheduler from db; starting empty");
-        }
-    }
+    catch_up(&state.db, &mut sched).await;
 
     loop {
         let wake_secs: u64 = match sched.next_due() {

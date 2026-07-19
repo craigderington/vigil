@@ -51,6 +51,15 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
         signal_complete(state, monitor_id);
         return;
     }
+    // Belt-and-suspenders: the scheduler (catch-up, reschedule_from_db)
+    // never enqueues a heartbeat monitor, but if one ever slips through,
+    // never let it reach the prober — a heartbeat has no url/host, so
+    // `probe::run`'s HTTP fallback would connection-error into a false
+    // DOWN, fighting the ping-driven state.
+    if m.r#type == "heartbeat" {
+        signal_complete(state, monitor_id);
+        return;
+    }
 
     let out = if m.r#type == "ssl" {
         crate::certcheck::ssl::ssl_probe(state, &m).await
