@@ -12,6 +12,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{AppState, SchedCmd};
+use crate::maintenance_windows::{
+    self,
+    resolve::{maintenance_for, parse_tags, Suppression},
+};
 use crate::models::Monitor;
 use crate::{engine, probe, scheduler};
 
@@ -59,6 +63,38 @@ pub async fn run_check(state: &AppState, monitor_id: i64) {
     if m.r#type == "heartbeat" {
         signal_complete(state, monitor_id);
         return;
+    }
+
+    // A monitor under an active `checks`-suppressing maintenance window
+    // skips the probe entirely — no `checks` row, status untouched. Still
+    // must advance `next_run_at` (via UPDATE, error logged not swallowed):
+    // returning without it would leave the stale past value in place, and
+    // `reschedule_from_db` would re-heap this monitor at that same stale
+    // instant on every scheduler pass — a tight busy-loop for the whole
+    // window. `alerts`-only windows do NOT pause checks (§8 of the design
+    // spec) — only `Suppression::Checks` short-circuits here.
+    //
+    // Scoped in its own block: a `let now = now();` binding here would
+    // otherwise shadow the `now` fn item for the rest of `run_check`,
+    // breaking the pre-existing post-probe `let now = now();` below (which
+    // needs to call the fn again, not reuse this pre-probe value).
+    {
+        let now = now();
+        let windows = maintenance_windows::active_windows(&state.db).await;
+        let tags = parse_tags(m.tags.as_deref().unwrap_or(""));
+        if let Suppression::Checks = maintenance_for(&windows, m.id, &tags, now) {
+            let next = scheduler::next_run_with_jitter(now, m.interval_seconds);
+            if let Err(e) = sqlx::query("UPDATE monitors SET next_run_at = ? WHERE id = ?")
+                .bind(next)
+                .bind(m.id)
+                .execute(&state.db)
+                .await
+            {
+                tracing::error!(monitor_id = m.id, error = %e, "maintenance checks-window: failed to advance next_run_at");
+            }
+            signal_complete(state, monitor_id);
+            return;
+        }
     }
 
     let out = if m.r#type == "ssl" {

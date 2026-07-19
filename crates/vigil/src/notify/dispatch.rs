@@ -12,6 +12,10 @@ use serde::Deserialize;
 
 use crate::app::AppState;
 use crate::cooldown;
+use crate::maintenance_windows::{
+    self,
+    resolve::{maintenance_for, parse_tags, Suppression},
+};
 use crate::models::{Monitor, Trigger};
 use crate::notify::{templates, AlertCtx, EmailMsg, NotifyMsg, SmtpConfig, TemplateCtx};
 use crate::settings_store;
@@ -147,6 +151,21 @@ pub async fn deliver(
     incident_id: Option<i64>,
 ) -> anyhow::Result<()> {
     let sent_at = now();
+
+    // A monitor under ANY active maintenance window (alerts- or
+    // checks-suppressing — both mute alerts, `checks` additionally pauses
+    // probing/reaping elsewhere) never gets an alert. The incident itself
+    // still opens/closes normally (engine::apply_result / heartbeat::reap_one
+    // don't consult maintenance at all) — only this notification funnel is
+    // muted, so uptime exclusion (maintenance_intervals) is what nets the
+    // outage back out of the uptime %, not a missing incident row.
+    let windows = maintenance_windows::active_windows(&state.db).await;
+    let tags = parse_tags(m.tags.as_deref().unwrap_or(""));
+    if !matches!(maintenance_for(&windows, m.id, &tags, sent_at), Suppression::None) {
+        tracing::debug!(monitor_id = m.id, "alert suppressed by maintenance window");
+        return Ok(());
+    }
+
     let cooldown_minutes = settings_store::cooldown_minutes(&state.db).await;
     let trigger_str = trigger.as_str();
 

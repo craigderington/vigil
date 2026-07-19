@@ -16,6 +16,10 @@ use sqlx::Connection;
 use crate::app::AppState;
 use crate::engine;
 use crate::events::Event;
+use crate::maintenance_windows::{
+    self,
+    resolve::{maintenance_for, parse_tags, Suppression},
+};
 use crate::models::{Monitor, Status, Trigger};
 use crate::settings_store;
 
@@ -179,7 +183,7 @@ pub(crate) async fn record_ping(state: &AppState, m: &Monitor) -> anyhow::Result
 pub async fn reap_once(state: &AppState) -> anyhow::Result<()> {
     let n = now();
 
-    let due: Vec<Monitor> = sqlx::query_as(
+    let mut due: Vec<Monitor> = sqlx::query_as(
         "SELECT * FROM monitors WHERE type = 'heartbeat' AND is_paused = 0 AND status = 'up' \
          AND last_ping_at IS NOT NULL \
          AND ? > last_ping_at + interval_seconds + heartbeat_grace_seconds",
@@ -187,6 +191,17 @@ pub async fn reap_once(state: &AppState) -> anyhow::Result<()> {
     .bind(n)
     .fetch_all(&state.db)
     .await?;
+
+    // Checks-ONLY filter, applied outside `reap_one`'s `BEGIN IMMEDIATE` tx.
+    // An `alerts`-only window must NOT exclude a heartbeat here — it still
+    // needs to reap/open the incident (its alert is muted separately by
+    // `dispatch::deliver`'s maintenance guard); wrongly excluding it would
+    // erase the outage from history instead of just muting the alert.
+    let windows = maintenance_windows::active_windows(&state.db).await;
+    due.retain(|m| {
+        let tags = parse_tags(m.tags.as_deref().unwrap_or(""));
+        !matches!(maintenance_for(&windows, m.id, &tags, n), Suppression::Checks)
+    });
 
     for m in due {
         if let Err(e) = reap_one(state, &m, n).await {
