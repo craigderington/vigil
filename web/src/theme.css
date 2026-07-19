@@ -39,6 +39,7 @@ button{font-family:inherit;color:inherit}
 }
 .rail-item:hover{background:var(--bg-surface-2);color:var(--text-primary)}
 .rail-item[aria-current="page"]{background:var(--bg-surface-2);color:var(--accent);border-color:var(--border-default)}
+.rail-icon{width:20px;height:20px;display:block}
 
 .rail-summary{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:11px}
 .rail-summary .stat{display:flex;align-items:center;gap:4px}
@@ -121,6 +122,7 @@ button{font-family:inherit;color:inherit}
 .card-response{font-size:16px;color:var(--text-primary)}
 .card-response .unit{color:var(--text-tertiary);font-size:12px;margin-left:2px}
 .card-badges{display:flex;align-items:center;gap:8px;margin-top:10px}
+.monitor-card .uptime-bar{margin-top:12px}
 .uptime-badge{
   font-size:12px;color:var(--text-secondary);background:var(--bg-surface-3);
   border-radius:var(--r-pill);padding:3px 10px;
