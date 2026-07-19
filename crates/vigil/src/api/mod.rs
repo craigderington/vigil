@@ -45,6 +45,7 @@ pub fn routes() -> Router<AppState> {
         .route("/monitors/:id/bars", get(monitors::bars))
         .route("/monitors/:id/ssl", get(monitors::get_ssl))
         .route("/monitors/:id/domain", get(monitors::get_domain))
+        .route("/monitors/:id/heartbeat", get(monitors::get_heartbeat))
         .route("/monitors/:id/refresh-ssl", post(monitors::refresh_ssl))
         .route("/monitors/:id/refresh-domain", post(monitors::refresh_domain))
         .route(

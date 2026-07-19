@@ -8,6 +8,7 @@ pub mod cooldown;
 pub mod db;
 pub mod engine;
 pub mod events;
+pub mod heartbeat;
 pub mod maintenance;
 pub mod models;
 pub mod notify;

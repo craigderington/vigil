@@ -47,12 +47,35 @@ fn validate_monitor_dto(
     keyword_mode: &Option<String>,
     dns_record_type: &Option<String>,
     ssl_check_enabled: bool,
+    interval_seconds: i64,
+    heartbeat_grace_seconds: i64,
+    domain_check_enabled: bool,
 ) -> Result<(), String> {
     fn blank(s: &Option<String>) -> bool {
         s.as_deref().map(str::trim).unwrap_or("").is_empty()
     }
 
     match r#type {
+        // Push monitor: no probe target at all (no url, no host) — the
+        // inbound `/ping/:token` is the only signal. Its own floor (30s, not
+        // the global 15s) exists because a heartbeat's "interval" also
+        // gates the reaper's missed-ping grace window, so overly-tight
+        // values would make the fast-retry-style flapping this type is
+        // supposed to avoid.
+        "heartbeat" => {
+            if ssl_check_enabled || domain_check_enabled {
+                return Err(
+                    "ssl_check_enabled/domain_check_enabled are not supported on heartbeat monitors"
+                        .to_string(),
+                );
+            }
+            if heartbeat_grace_seconds < 1 {
+                return Err("heartbeat_grace_seconds must be >= 1".to_string());
+            }
+            if interval_seconds < 30 {
+                return Err("heartbeat monitors require interval_seconds >= 30".to_string());
+            }
+        }
         "keyword" => {
             if blank(url) {
                 return Err("url is required".to_string());
@@ -144,6 +167,9 @@ pub async fn create(
         &dto.keyword_mode,
         &dto.dns_record_type,
         dto.ssl_check_enabled,
+        dto.interval_seconds,
+        dto.heartbeat_grace_seconds,
+        dto.domain_check_enabled,
     ) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
@@ -151,49 +177,82 @@ pub async fn create(
         return Err((StatusCode::UNPROCESSABLE_ENTITY, "interval must be >= 15s".to_string()));
     }
 
+    // Heartbeat monitors have no confirmation/retry cadence to speak of —
+    // a single missed ping past the grace window IS the outage, and a
+    // single received ping IS the recovery — so both thresholds are forced
+    // to 1 regardless of what the DTO carries (§5).
+    let is_heartbeat = dto.r#type == "heartbeat";
+    let (confirmation_threshold, recovery_threshold) =
+        if is_heartbeat { (1, 1) } else { (dto.confirmation_threshold, dto.recovery_threshold) };
+
     let ts = now();
-    let id: i64 = sqlx::query_scalar(
-        "INSERT INTO monitors (name, type, url, method, headers, body, auth_type, auth_ref, \
-         expected_status_codes, interval_seconds, timeout_seconds, follow_redirects, verify_ssl, \
-         confirmation_threshold, recovery_threshold, retry_interval_seconds, \
-         host, port, keyword, keyword_mode, keyword_case_sensitive, dns_record_type, dns_expected_value, \
-         ssl_check_enabled, ssl_alert_days, domain_check_enabled, domain_alert_days, \
-         status, is_paused, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?) \
-         RETURNING id",
-    )
-    .bind(&dto.name)
-    .bind(&dto.r#type)
-    .bind(&dto.url)
-    .bind(&dto.method)
-    .bind(&dto.headers)
-    .bind(&dto.body)
-    .bind(&dto.auth_type)
-    .bind(&dto.auth_ref)
-    .bind(&dto.expected_status_codes)
-    .bind(dto.interval_seconds)
-    .bind(dto.timeout_seconds)
-    .bind(dto.follow_redirects)
-    .bind(dto.verify_ssl)
-    .bind(dto.confirmation_threshold)
-    .bind(dto.recovery_threshold)
-    .bind(dto.retry_interval_seconds)
-    .bind(&dto.host)
-    .bind(dto.port)
-    .bind(&dto.keyword)
-    .bind(&dto.keyword_mode)
-    .bind(dto.keyword_case_sensitive)
-    .bind(&dto.dns_record_type)
-    .bind(&dto.dns_expected_value)
-    .bind(dto.ssl_check_enabled)
-    .bind(&dto.ssl_alert_days)
-    .bind(dto.domain_check_enabled)
-    .bind(&dto.domain_alert_days)
-    .bind(ts)
-    .bind(ts)
-    .fetch_one(&state.db)
-    .await
-    .map_err(db_err)?;
+
+    // Token collisions against the unique index are astronomically
+    // unlikely for a 32-char alphanumeric draw, but the retry is cheap
+    // insurance — cap it rather than looping forever on a genuinely broken
+    // RNG or index.
+    const MAX_TOKEN_ATTEMPTS: u32 = 3;
+    let mut attempt = 0u32;
+    let id: i64 = loop {
+        attempt += 1;
+        let heartbeat_token = is_heartbeat.then(crate::heartbeat::generate_token);
+        let result: Result<i64, sqlx::Error> = sqlx::query_scalar(
+            "INSERT INTO monitors (name, type, url, method, headers, body, auth_type, auth_ref, \
+             expected_status_codes, interval_seconds, timeout_seconds, follow_redirects, verify_ssl, \
+             confirmation_threshold, recovery_threshold, retry_interval_seconds, \
+             host, port, keyword, keyword_mode, keyword_case_sensitive, dns_record_type, dns_expected_value, \
+             ssl_check_enabled, ssl_alert_days, domain_check_enabled, domain_alert_days, \
+             heartbeat_token, heartbeat_grace_seconds, \
+             status, is_paused, last_ping_at, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+             'pending', 0, NULL, ?, ?) \
+             RETURNING id",
+        )
+        .bind(&dto.name)
+        .bind(&dto.r#type)
+        .bind(&dto.url)
+        .bind(&dto.method)
+        .bind(&dto.headers)
+        .bind(&dto.body)
+        .bind(&dto.auth_type)
+        .bind(&dto.auth_ref)
+        .bind(&dto.expected_status_codes)
+        .bind(dto.interval_seconds)
+        .bind(dto.timeout_seconds)
+        .bind(dto.follow_redirects)
+        .bind(dto.verify_ssl)
+        .bind(confirmation_threshold)
+        .bind(recovery_threshold)
+        .bind(dto.retry_interval_seconds)
+        .bind(&dto.host)
+        .bind(dto.port)
+        .bind(&dto.keyword)
+        .bind(&dto.keyword_mode)
+        .bind(dto.keyword_case_sensitive)
+        .bind(&dto.dns_record_type)
+        .bind(&dto.dns_expected_value)
+        .bind(dto.ssl_check_enabled)
+        .bind(&dto.ssl_alert_days)
+        .bind(dto.domain_check_enabled)
+        .bind(&dto.domain_alert_days)
+        .bind(&heartbeat_token)
+        .bind(dto.heartbeat_grace_seconds)
+        .bind(ts)
+        .bind(ts)
+        .fetch_one(&state.db)
+        .await;
+
+        match result {
+            Ok(new_id) => break new_id,
+            Err(e)
+                if attempt < MAX_TOKEN_ATTEMPTS
+                    && e.as_database_error().is_some_and(|de| de.is_unique_violation()) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(db_err(e)),
+        }
+    };
 
     let _ = state.sched_tx.send(SchedCmd::Upsert(id));
 
@@ -225,8 +284,8 @@ pub async fn update(
     let timeout_seconds = dto.timeout_seconds.unwrap_or(existing.timeout_seconds);
     let follow_redirects = dto.follow_redirects.unwrap_or(existing.follow_redirects);
     let verify_ssl = dto.verify_ssl.unwrap_or(existing.verify_ssl);
-    let confirmation_threshold = dto.confirmation_threshold.unwrap_or(existing.confirmation_threshold);
-    let recovery_threshold = dto.recovery_threshold.unwrap_or(existing.recovery_threshold);
+    let mut confirmation_threshold = dto.confirmation_threshold.unwrap_or(existing.confirmation_threshold);
+    let mut recovery_threshold = dto.recovery_threshold.unwrap_or(existing.recovery_threshold);
     let retry_interval_seconds = dto.retry_interval_seconds.unwrap_or(existing.retry_interval_seconds);
     // `type` is NOT mutable on edit — set once at create; the form disables
     // the type selector in edit mode, so UpdateMonitorDto has no `type` field.
@@ -241,6 +300,15 @@ pub async fn update(
     let ssl_alert_days = dto.ssl_alert_days.unwrap_or(existing.ssl_alert_days);
     let domain_check_enabled = dto.domain_check_enabled.unwrap_or(existing.domain_check_enabled);
     let domain_alert_days = dto.domain_alert_days.unwrap_or(existing.domain_alert_days);
+    let heartbeat_grace_seconds =
+        dto.heartbeat_grace_seconds.unwrap_or(existing.heartbeat_grace_seconds);
+
+    // Same forcing as `create` (§5) — an edit can never relax a heartbeat's
+    // thresholds off 1, no matter what the DTO carries.
+    if existing.r#type == "heartbeat" {
+        confirmation_threshold = 1;
+        recovery_threshold = 1;
+    }
 
     if let Err(msg) = validate_monitor_dto(
         &existing.r#type,
@@ -251,6 +319,9 @@ pub async fn update(
         &keyword_mode,
         &dns_record_type,
         ssl_check_enabled,
+        interval_seconds,
+        heartbeat_grace_seconds,
+        domain_check_enabled,
     ) {
         return Err((StatusCode::UNPROCESSABLE_ENTITY, msg));
     }
@@ -262,7 +333,7 @@ pub async fn update(
          verify_ssl=?, confirmation_threshold=?, recovery_threshold=?, retry_interval_seconds=?, \
          host=?, port=?, keyword=?, keyword_mode=?, keyword_case_sensitive=?, dns_record_type=?, \
          dns_expected_value=?, ssl_check_enabled=?, ssl_alert_days=?, domain_check_enabled=?, \
-         domain_alert_days=?, updated_at=? WHERE id=?",
+         domain_alert_days=?, heartbeat_grace_seconds=?, updated_at=? WHERE id=?",
     )
     .bind(&name)
     .bind(&url)
@@ -290,6 +361,7 @@ pub async fn update(
     .bind(&ssl_alert_days)
     .bind(domain_check_enabled)
     .bind(&domain_alert_days)
+    .bind(heartbeat_grace_seconds)
     .bind(ts)
     .bind(id)
     .execute(&state.db)
@@ -342,6 +414,22 @@ pub async fn check_now(State(state): State<AppState>, Path(id): Path<i64>) -> Ap
 /// `models::test_defaults_monitor()` (a fully-defaulted `http` monitor) and
 /// overrides only the fields the DTO carries.
 pub async fn test_check(Json(dto): Json<CreateMonitorDto>) -> Json<ProbeOutcome> {
+    // Heartbeat is a push (inverse) monitor — there is nothing to dial out
+    // to, so `dto.url`/`dto.host` are always empty here. Without this guard
+    // the dispatch below falls through `probe::run`'s catch-all arm into
+    // `http::probe` against a null URL rather than reporting the real
+    // reason there's no live result to show.
+    if dto.r#type == "heartbeat" {
+        return Json(ProbeOutcome {
+            ok: false,
+            response_time_ms: None,
+            status_code: None,
+            error_message: Some("n/a — heartbeat is a push monitor; it has no probe".to_string()),
+            resolved_ip: None,
+            cause: None,
+        });
+    }
+
     let mut m = crate::models::test_defaults_monitor();
     m.name = dto.name;
     m.r#type = dto.r#type;
@@ -803,4 +891,23 @@ pub async fn refresh_domain(State(state): State<AppState>, Path(id): Path<i64>) 
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     get_domain(State(state), Path(id)).await
+}
+
+/// The heartbeat monitor's push-ping capability token (§9/§10). This is the
+/// ONLY route that ever returns a `heartbeat_token` — `Monitor` marks the
+/// field `#[serde(skip_serializing)]` (Task 1) precisely so list/get_one/
+/// create/update responses can never leak it. 404 for a non-heartbeat
+/// monitor (including one that doesn't exist) or a heartbeat row with no
+/// token yet (shouldn't happen post-`create`, but fail closed rather than
+/// serializing a null).
+pub async fn get_heartbeat(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    let m = fetch_monitor(&state.db, id).await.map_err(db_err)?.ok_or_else(not_found)?;
+    if m.r#type != "heartbeat" {
+        return Err(not_found());
+    }
+    let token = m.heartbeat_token.ok_or_else(not_found)?;
+    Ok(Json(json!({
+        "token": token,
+        "ping_path": format!("/ping/{token}"),
+    })))
 }
