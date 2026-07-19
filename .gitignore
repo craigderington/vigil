@@ -3,3 +3,6 @@ web/node_modules
 web/dist
 secrets/*
 !secrets/*.example
+# Stray SMTP-credential files that must never be committed (both spellings)
+/smtp_username
+/smpt_username
