@@ -281,7 +281,9 @@ pub async fn run_reaper(state: AppState) {
     loop {
         let tick = settings_store::heartbeat_tick_seconds(&state.db).await;
         tokio::time::sleep(Duration::from_secs(tick.max(1) as u64)).await;
-        let _ = reap_once(&state).await;
+        if let Err(e) = reap_once(&state).await {
+            tracing::warn!(error = %e, "heartbeat reaper pass failed");
+        }
     }
 }
 

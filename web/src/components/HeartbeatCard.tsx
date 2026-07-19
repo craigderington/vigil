@@ -29,7 +29,7 @@ function absoluteFrom(epochSeconds: number | null | undefined): string | undefin
 }
 
 /** `last_ping_at + interval_seconds + heartbeat_grace_seconds` — the same
- *  overdue boundary the backend reaper (`heartbeat::reap_due`) uses to
+ *  overdue boundary the backend reaper (`heartbeat::reap_once`) uses to
  *  drive a silent heartbeat DOWN. `null` when there's no ping yet. */
 function nextExpectedBy(monitor: any): number | null {
   const last = monitor?.last_ping_at;

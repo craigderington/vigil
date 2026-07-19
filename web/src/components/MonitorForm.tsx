@@ -684,17 +684,17 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
                   onInput={(e) => setRecoveryThreshold(Number(e.currentTarget.value) || 1)}
                 />
               </div>
+              <div class="form-field">
+                <label for="mf-retry">Retry interval (seconds)</label>
+                <input
+                  id="mf-retry"
+                  type="number"
+                  min={1}
+                  value={retryInterval()}
+                  onInput={(e) => setRetryInterval(Number(e.currentTarget.value) || 1)}
+                />
+              </div>
             </Show>
-            <div class="form-field">
-              <label for="mf-retry">Retry interval (seconds)</label>
-              <input
-                id="mf-retry"
-                type="number"
-                min={1}
-                value={retryInterval()}
-                onInput={(e) => setRetryInterval(Number(e.currentTarget.value) || 1)}
-              />
-            </div>
             <Show when={type() === "heartbeat"}>
               <div class="form-field">
                 <label for="mf-grace">Grace period (seconds)</label>
