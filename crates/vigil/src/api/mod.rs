@@ -4,6 +4,7 @@
 
 pub mod channels;
 pub mod incidents;
+pub mod maintenance;
 pub mod monitors;
 pub mod settings;
 pub mod sse;
@@ -60,6 +61,15 @@ pub fn routes() -> Router<AppState> {
             axum::routing::put(channels::update).delete(channels::delete),
         )
         .route("/channels/:id/test", post(channels::test))
+        .route(
+            "/maintenance-windows",
+            get(maintenance::list).post(maintenance::create),
+        )
+        .route("/maintenance-windows/preview", post(maintenance::preview))
+        .route(
+            "/maintenance-windows/:id",
+            axum::routing::put(maintenance::update).delete(maintenance::delete),
+        )
         .route(
             "/settings",
             get(settings::get_settings).put(settings::update_settings),
