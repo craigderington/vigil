@@ -371,6 +371,7 @@ button{font-family:inherit;color:inherit}
 .header-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center}
 .notif-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--border-subtle)}
 .notif-row:last-child{border-bottom:none}
+.notif-row.row-disabled{opacity:.55}
 .test-result{
   background:var(--bg-surface-2);border:1px solid var(--border-default);border-radius:var(--r-md);
   padding:10px 12px;font-size:13px;color:var(--text-primary);

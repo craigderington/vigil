@@ -162,6 +162,20 @@ const Maintenance: Component = () => {
     }
   }
 
+  // Per-row enable/disable (spec §8: "Edit / delete / enable-disable per
+  // row"). `is_active` exists specifically so a window can be turned off
+  // without deleting it — a full field-editor (name/scope/schedule) is OUT
+  // of scope for v1; create + toggle + delete is the v1 CRUD surface for
+  // this screen. Same fire-and-refetch pattern as handleDelete above.
+  async function handleToggleActive(w: any) {
+    try {
+      await api.updateMaintenanceWindow(w.id, { is_active: !w.is_active });
+      refetch();
+    } catch {
+      // leave the row in the list so the operator can retry
+    }
+  }
+
   return (
     <div class="settings-view maintenance-view">
       <h2 class="settings-title">Maintenance</h2>
@@ -173,16 +187,19 @@ const Maintenance: Component = () => {
         </Show>
         <For each={windows() ?? []}>
           {(w) => (
-            <div class="notif-row">
+            <div class={`notif-row${w.is_active ? "" : " row-disabled"}`}>
               <span>{w.name}</span>
               <span class="settings-note">{describeScope(w)}</span>
               <span class="settings-note">
                 {w.recurrence ? `recurring · ${w.recurrence}` : "one-off"}
               </span>
               <span class="settings-note">suppresses {w.suppress}</span>
-              <Show when={w.is_active}>
+              <Show when={w.is_active} fallback={<span class="status-pill paused">Disabled</span>}>
                 <span class="status-pill maintenance">Active</span>
               </Show>
+              <button type="button" class="btn-link" onClick={() => handleToggleActive(w)}>
+                {w.is_active ? "Disable" : "Enable"}
+              </button>
               <button type="button" class="btn-link danger" onClick={() => handleDelete(w.id)}>
                 Delete
               </button>

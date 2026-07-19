@@ -17,7 +17,27 @@ const sampleWindows = [
   },
 ];
 
-function stubFetch(handlers: { list?: any[]; onPost?: (url: string, body: any) => any }) {
+const sampleWindowsWithDisabled = [
+  ...sampleWindows,
+  {
+    id: 2,
+    name: "Old drill",
+    scope: "all",
+    target_ref: null,
+    starts_at: 1000,
+    ends_at: 2000,
+    recurrence: null,
+    suppress: "alerts",
+    is_active: false,
+    created_at: 0,
+  },
+];
+
+function stubFetch(handlers: {
+  list?: any[];
+  onPost?: (url: string, body: any) => any;
+  onPut?: (url: string, body: any) => any;
+}) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: any, opts?: any) => {
@@ -32,6 +52,11 @@ function stubFetch(handlers: { list?: any[]; onPost?: (url: string, body: any) =
       }
       if (u === "/api/maintenance-windows/preview") {
         return { ok: true, json: async () => ({ affected_monitor_ids: [], active_now: null }) } as any;
+      }
+      if (u.startsWith("/api/maintenance-windows/") && opts?.method === "PUT") {
+        const body = JSON.parse(opts.body);
+        const result = handlers.onPut?.(u, body) ?? { id: 1, ...body };
+        return { ok: true, json: async () => result } as any;
       }
       if (u.startsWith("/api/maintenance-windows/") && opts?.method === "DELETE") {
         return { ok: true, json: async () => ({ ok: true }) } as any;
@@ -160,4 +185,47 @@ test("saving a recurring window sends a recurrence string and monitors[] target_
   expect(dto.recurrence).toBe("0 2 * * *");
   // duration is minutes -> ends_at - starts_at should be 30*60 seconds
   expect(dto.ends_at - dto.starts_at).toBe(30 * 60);
+});
+
+test("clicking Disable on an active window calls updateMaintenanceWindow(id, {is_active:false}) and refreshes", async () => {
+  const puts: { url: string; body: any }[] = [];
+  stubFetch({
+    list: sampleWindows,
+    onPut: (u, body) => {
+      puts.push({ url: u, body });
+      return { ...sampleWindows[0], ...body };
+    },
+  });
+  render(() => <Maintenance />);
+
+  await screen.findByText("Router upgrade");
+  fireEvent.click(screen.getByRole("button", { name: /disable/i }));
+
+  await vi.waitFor(() => expect(puts.length).toBe(1));
+  expect(puts[0].url).toBe("/api/maintenance-windows/1");
+  expect(puts[0].body).toEqual({ is_active: false });
+});
+
+test("a disabled window renders a Disabled badge, dimmed styling, and an Enable toggle that flips is_active back to true", async () => {
+  const puts: { url: string; body: any }[] = [];
+  stubFetch({
+    list: sampleWindowsWithDisabled,
+    onPut: (u, body) => {
+      puts.push({ url: u, body });
+      return { ...sampleWindowsWithDisabled[1], ...body };
+    },
+  });
+  render(() => <Maintenance />);
+
+  await screen.findByText("Old drill");
+  expect(screen.getByText(/disabled/i)).toBeTruthy();
+
+  const disabledRow = screen.getByText("Old drill").closest(".notif-row");
+  expect(disabledRow?.className).toMatch(/disabled/);
+
+  fireEvent.click(screen.getByRole("button", { name: /enable/i }));
+
+  await vi.waitFor(() => expect(puts.length).toBe(1));
+  expect(puts[0].url).toBe("/api/maintenance-windows/2");
+  expect(puts[0].body).toEqual({ is_active: true });
 });
