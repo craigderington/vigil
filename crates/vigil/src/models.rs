@@ -479,7 +479,12 @@ pub struct UpdateMaintenanceWindowDto {
 ///   array of integers; `tag` ⇒ a non-empty JSON string; `all` ⇒ ignored
 ///   (any value, including `None`, is accepted — the API layer forces it
 ///   to `NULL` before storage).
-/// - `ends_at > starts_at`.
+/// - `ends_at > starts_at`, computed via `checked_sub` so `starts_at`/
+///   `ends_at` at the i64 extremes are rejected as out-of-range rather than
+///   overflowing the subtraction, and the resulting duration is capped at
+///   366 days (a longer maintenance window is nonsensical, and this bounds
+///   the `dur` every downstream consumer — e.g. `resolve.rs`'s cron
+///   math — ever sees for an API-created window).
 /// - a non-null `recurrence` must split into EXACTLY 5 whitespace-separated
 ///   fields (rejecting 6/7-field seconds/year forms and `@`-macros, which
 ///   never split into 5) AND parse successfully under `croner::Cron`.
@@ -506,8 +511,13 @@ pub fn validate_window_dto(
         },
         _ => return Err("scope must be one of all|tag|monitors".into()),
     }
-    if ends_at <= starts_at {
+    let dur = ends_at.checked_sub(starts_at).ok_or_else(|| "window duration is out of range".to_string())?;
+    if dur <= 0 {
         return Err("ends_at must be after starts_at".into());
+    }
+    const MAX_WINDOW_DURATION_SECONDS: i64 = 366 * 24 * 3600;
+    if dur > MAX_WINDOW_DURATION_SECONDS {
+        return Err("window duration exceeds 366 days".into());
     }
     if let Some(expr) = recurrence {
         let fields: Vec<&str> = expr.split_whitespace().collect();
@@ -645,6 +655,26 @@ mod maintenance_window_validation_tests {
     #[test]
     fn ends_at_before_starts_at_rejected() {
         assert!(validate_window_dto("w", "all", &None, 2000, 1000, &None).is_err());
+    }
+
+    #[test]
+    fn extreme_bounds_overflow_rejected_not_panics() {
+        // starts_at/ends_at at the i64 extremes must be rejected via a
+        // checked_sub, not panic (debug/CI overflow-checks) or wrap
+        // (release) inside the validator itself.
+        assert!(validate_window_dto("w", "all", &None, i64::MIN, i64::MAX, &None).is_err());
+    }
+
+    #[test]
+    fn duration_over_366_days_rejected() {
+        let too_long = 366 * 24 * 3600 + 1;
+        assert!(validate_window_dto("w", "all", &None, 0, too_long, &None).is_err());
+    }
+
+    #[test]
+    fn duration_exactly_366_days_accepted() {
+        let max_ok = 366 * 24 * 3600;
+        assert!(validate_window_dto("w", "all", &None, 0, max_ok, &None).is_ok());
     }
 
     #[test]

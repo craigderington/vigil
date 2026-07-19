@@ -11,8 +11,10 @@
 //! occurrence counterpart. Both [`window_active_at`]'s cron path and
 //! [`occurrences_overlapping`]'s cron path therefore do a bounded FORWARD
 //! scan from an anchor that is deliberately backed up by the window's
-//! duration (`dur = ends_at - starts_at`), so an occurrence that started
-//! before the point of interest but still covers it is never missed:
+//! duration (`dur = ends_at.checked_sub(starts_at)`, treating overflow the
+//! same as a non-positive duration — see below), so an occurrence that
+//! started before the point of interest but still covers it is never
+//! missed:
 //!
 //! - the *first* call is `inclusive = true`, so an occurrence starting
 //!   exactly at the anchor is not skipped (otherwise a window active at the
@@ -70,23 +72,35 @@ fn to_utc(t: Ts) -> Option<chrono::DateTime<chrono::Utc>> {
 ///
 /// - **One-off** (`recurrence.is_none()`): `starts_at <= now <= ends_at`.
 /// - **Cron** (`recurrence = Some(expr)`): the window recurs with duration
-///   `dur = ends_at - starts_at` starting at each cron occurrence, floored
-///   by `starts_at` (a cron window has no occurrences before its
-///   configured start — matches the migration's "the >= lower bound ...
-///   for cron" comment on the `starts_at` column). Since croner is
+///   `dur = ends_at.checked_sub(starts_at)` starting at each cron
+///   occurrence, floored by `starts_at` (a cron window has no occurrences
+///   before its configured start — matches the migration's "the >= lower
+///   bound ... for cron" comment on the `starts_at` column). Since croner is
 ///   forward-only, we scan forward from
 ///   `anchor = max(starts_at, now - dur)` — far enough back that an
 ///   occurrence starting before `now` but still covering it isn't missed —
 ///   collecting the LAST occurrence start `s <= now`. Active iff a
 ///   qualifying `s` was found and `now < s + dur` (the `s >= starts_at`
 ///   check is implied by the anchor but kept explicit for clarity/safety).
-///   An unparseable `recurrence`, a non-positive `dur`, or an epoch
-///   `chrono` can't represent all resolve to `false`.
+///   An unparseable `recurrence`, a non-positive or overflowing `dur`
+///   (`validate_window_dto` bounds this for every API-created window, but a
+///   directly-inserted DB row could still overflow the subtraction — guarded
+///   here via `checked_sub` so it resolves to `false` rather than panicking
+///   or wrapping), or an epoch `chrono` can't represent all resolve to
+///   `false`.
 pub fn window_active_at(window: &MaintenanceWindow, now: Ts) -> bool {
     match &window.recurrence {
         None => window.starts_at <= now && now <= window.ends_at,
         Some(expr) => {
-            let dur = window.ends_at - window.starts_at;
+            // `checked_sub`, not `-`: a directly-inserted DB row that
+            // bypassed `validate_window_dto` (e.g. a manual edit) could
+            // carry starts_at/ends_at far enough apart to overflow i64;
+            // treat that the same as a non-positive duration — inactive —
+            // rather than panicking (debug/CI overflow-checks) or wrapping
+            // to a garbage `dur` (release).
+            let Some(dur) = window.ends_at.checked_sub(window.starts_at) else {
+                return false;
+            };
             if dur <= 0 {
                 return false;
             }
@@ -141,8 +155,10 @@ fn last_occurrence_start(cron: &croner::Cron, anchor: Ts, limit: Ts, window_id: 
 ///
 /// - **One-off**: the single `(starts_at, ends_at)` interval, if it
 ///   overlaps `[from, to]` at all.
-/// - **Cron**: the window recurs with duration `dur = ends_at - starts_at`.
-///   Scans forward from `anchor = max(from - dur, starts_at)` — NOT from
+/// - **Cron**: the window recurs with duration
+///   `dur = ends_at.checked_sub(starts_at)` (empty if that overflows or is
+///   non-positive — see [`window_active_at`]'s doc for why). Scans forward
+///   from `anchor = max(from - dur, starts_at)` — NOT from
 ///   `from` — because an occurrence starting before `from` can still
 ///   extend into `[from, to]` (e.g. an hourly cron with a 1h duration: the
 ///   occurrence starting at 02:00 covers `[02:00, 03:00]`, which overlaps
@@ -167,7 +183,12 @@ pub fn occurrences_overlapping(window: &MaintenanceWindow, from: Ts, to: Ts) -> 
             }
         }
         Some(expr) => {
-            let dur = window.ends_at - window.starts_at;
+            // See the matching comment in `window_active_at`: `checked_sub`
+            // guards a directly-inserted DB row that bypassed
+            // `validate_window_dto` from panicking/wrapping on overflow.
+            let Some(dur) = window.ends_at.checked_sub(window.starts_at) else {
+                return vec![];
+            };
             if dur <= 0 {
                 return vec![];
             }
@@ -428,6 +449,32 @@ mod tests {
         // (01:00), not stop at the first one found (00:00).
         let w = window(1, "all", None, JAN1_00, JAN1_00 + 7_200, Some("0 * * * *"), "alerts", true);
         assert!(window_active_at(&w, JAN1_0130));
+    }
+
+    #[test]
+    fn cron_extreme_bounds_overflow_never_panics_or_wraps() {
+        // A directly-inserted DB row that bypassed `validate_window_dto`
+        // (e.g. manual edit) could carry starts_at/ends_at at the i64
+        // extremes. `ends_at - starts_at` would panic under overflow-checks
+        // (debug/CI) or silently wrap in release; window_active_at and
+        // occurrences_overlapping must instead resolve to
+        // false/empty via `checked_sub`, never panic.
+        let w = window(1, "all", None, i64::MIN, i64::MAX, Some("0 * * * *"), "alerts", true);
+        assert!(!window_active_at(&w, 0));
+        assert_eq!(occurrences_overlapping(&w, -1_000, 1_000), vec![]);
+    }
+
+    #[test]
+    fn cron_dur_le_zero_inactive_and_no_occurrences() {
+        // A directly-inserted DB row with ends_at <= starts_at (bypassing
+        // `validate_window_dto`) must resolve to false/empty, not panic.
+        let w = window(1, "all", None, 2_000, 1_000, Some("0 * * * *"), "alerts", true);
+        assert!(!window_active_at(&w, 1_500));
+        assert_eq!(occurrences_overlapping(&w, 0, 5_000), vec![]);
+
+        let w_equal = window(2, "all", None, 1_000, 1_000, Some("0 * * * *"), "alerts", true);
+        assert!(!window_active_at(&w_equal, 1_000));
+        assert_eq!(occurrences_overlapping(&w_equal, 0, 5_000), vec![]);
     }
 
     // ---- occurrences_overlapping ----
