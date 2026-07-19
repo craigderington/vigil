@@ -11,6 +11,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../migrations/0002_signal.sql")),
     (3, include_str!("../migrations/0003_certs.sql")),
     (4, include_str!("../migrations/0004_heartbeat.sql")),
+    (5, include_str!("../migrations/0005_maintenance_windows.sql")),
 ];
 
 pub async fn connect(db_path: &str) -> anyhow::Result<sqlx::SqlitePool> {

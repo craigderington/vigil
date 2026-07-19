@@ -297,6 +297,31 @@ pub enum Connectivity {
     Offline,
 }
 
+/// A maintenance window (P4.2): scheduled downtime that suppresses alerts
+/// and/or checks for in-scope monitors. `target_ref` is the raw JSON
+/// string as stored (NULL for `all`, a JSON string for `tag`, a JSON array
+/// of ints for `monitors`) — the resolve module (a later task) parses it.
+/// `#[derive(sqlx::FromRow)]` per the `Channel` precedent (api/channels.rs):
+/// `is_active: bool` auto-decodes from the INTEGER column, no manual
+/// `FromRow` impl needed.
+///
+/// Deliberately NOT a `Status` variant — maintenance is a client-side
+/// display overlay (see the P4.2 design spec), so this struct has no
+/// bearing on `monitors.status`.
+#[derive(Clone, Debug, sqlx::FromRow, Serialize)]
+pub struct MaintenanceWindow {
+    pub id: i64,
+    pub name: String,
+    pub scope: String, // all|tag|monitors
+    pub target_ref: Option<String>,
+    pub starts_at: Ts,
+    pub ends_at: Ts,
+    pub recurrence: Option<String>,
+    pub suppress: String, // alerts|checks
+    pub is_active: bool,
+    pub created_at: Ts,
+}
+
 // ---- DTOs ----
 
 fn d_method() -> String {
@@ -415,6 +440,87 @@ pub struct UpdateMonitorDto {
     pub heartbeat_grace_seconds: Option<i64>,
 }
 
+pub fn default_suppress() -> String {
+    "alerts".into()
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateMaintenanceWindowDto {
+    pub name: String,
+    pub scope: String,
+    #[serde(default)]
+    pub target_ref: Option<serde_json::Value>,
+    pub starts_at: i64,
+    pub ends_at: i64,
+    #[serde(default)]
+    pub recurrence: Option<String>,
+    #[serde(default = "default_suppress")]
+    pub suppress: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateMaintenanceWindowDto {
+    pub name: Option<String>,
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub target_ref: Option<serde_json::Value>,
+    pub starts_at: Option<i64>,
+    pub ends_at: Option<i64>,
+    #[serde(default)]
+    pub recurrence: Option<String>,
+    pub suppress: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+/// Validates a maintenance-window create/update payload (P4.2 §7):
+/// - `name` non-empty.
+/// - `scope` is one of `all`/`tag`/`monitors`.
+/// - `target_ref` shape matches `scope`: `monitors` ⇒ a non-empty JSON
+///   array of integers; `tag` ⇒ a non-empty JSON string; `all` ⇒ ignored
+///   (any value, including `None`, is accepted — the API layer forces it
+///   to `NULL` before storage).
+/// - `ends_at > starts_at`.
+/// - a non-null `recurrence` must split into EXACTLY 5 whitespace-separated
+///   fields (rejecting 6/7-field seconds/year forms and `@`-macros, which
+///   never split into 5) AND parse successfully under `croner::Cron`.
+pub fn validate_window_dto(
+    name: &str,
+    scope: &str,
+    target_ref: &Option<serde_json::Value>,
+    starts_at: i64,
+    ends_at: i64,
+    recurrence: &Option<String>,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("name must not be empty".into());
+    }
+    match scope {
+        "all" => {}
+        "tag" => match target_ref {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => {}
+            _ => return Err("scope 'tag' requires a non-empty string target_ref".into()),
+        },
+        "monitors" => match target_ref {
+            Some(serde_json::Value::Array(arr)) if !arr.is_empty() && arr.iter().all(|v| v.is_i64() || v.is_u64()) => {}
+            _ => return Err("scope 'monitors' requires a non-empty array of monitor ids as target_ref".into()),
+        },
+        _ => return Err("scope must be one of all|tag|monitors".into()),
+    }
+    if ends_at <= starts_at {
+        return Err("ends_at must be after starts_at".into());
+    }
+    if let Some(expr) = recurrence {
+        let fields: Vec<&str> = expr.split_whitespace().collect();
+        if fields.len() != 5 {
+            return Err("recurrence must be exactly 5 whitespace-separated fields".into());
+        }
+        if croner::Cron::new(expr).parse().is_err() {
+            return Err("recurrence is not a valid 5-field cron expression".into());
+        }
+    }
+    Ok(())
+}
+
 /// Fully-defaulted http Monitor fixture for tests in later tasks.
 pub fn test_defaults_monitor() -> Monitor {
     Monitor {
@@ -459,5 +565,112 @@ pub fn test_defaults_monitor() -> Monitor {
         sort_order: 0,
         created_at: 0,
         updated_at: 0,
+    }
+}
+
+#[cfg(test)]
+mod maintenance_window_validation_tests {
+    use super::validate_window_dto;
+    use serde_json::json;
+
+    #[test]
+    fn valid_create_all_scope() {
+        assert!(validate_window_dto("nightly", "all", &None, 1000, 2000, &None).is_ok());
+    }
+
+    #[test]
+    fn valid_create_monitors_scope_with_cron() {
+        let target = Some(json!([1, 2, 3]));
+        assert!(validate_window_dto(
+            "db upgrade",
+            "monitors",
+            &target,
+            1000,
+            2000,
+            &Some("0 2 * * 0".to_string())
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn valid_create_tag_scope() {
+        let target = Some(json!("prod"));
+        assert!(validate_window_dto("tag window", "tag", &target, 1000, 2000, &None).is_ok());
+    }
+
+    #[test]
+    fn empty_name_rejected() {
+        assert!(validate_window_dto("", "all", &None, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn bad_scope_rejected() {
+        assert!(validate_window_dto("w", "bogus", &None, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn monitors_scope_non_array_target_ref_rejected() {
+        let target = Some(json!("not-an-array"));
+        assert!(validate_window_dto("w", "monitors", &target, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn monitors_scope_empty_array_target_ref_rejected() {
+        let target = Some(json!([]));
+        assert!(validate_window_dto("w", "monitors", &target, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn monitors_scope_missing_target_ref_rejected() {
+        assert!(validate_window_dto("w", "monitors", &None, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn tag_scope_non_string_target_ref_rejected() {
+        let target = Some(json!(["prod"]));
+        assert!(validate_window_dto("w", "tag", &target, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn tag_scope_empty_string_target_ref_rejected() {
+        let target = Some(json!(""));
+        assert!(validate_window_dto("w", "tag", &target, 1000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn ends_at_equal_starts_at_rejected() {
+        assert!(validate_window_dto("w", "all", &None, 2000, 2000, &None).is_err());
+    }
+
+    #[test]
+    fn ends_at_before_starts_at_rejected() {
+        assert!(validate_window_dto("w", "all", &None, 2000, 1000, &None).is_err());
+    }
+
+    #[test]
+    fn six_field_cron_rejected() {
+        // seconds-prefixed 6-field form must be rejected — the contract is
+        // strictly 5 fields.
+        let rec = Some("0 18 * * * 5".to_string());
+        assert!(validate_window_dto("w", "all", &None, 1000, 2000, &rec).is_err());
+    }
+
+    #[test]
+    fn macro_recurrence_rejected() {
+        // "@daily" splits into a single whitespace field, not 5.
+        let rec = Some("@daily".to_string());
+        assert!(validate_window_dto("w", "all", &None, 1000, 2000, &rec).is_err());
+    }
+
+    #[test]
+    fn malformed_five_field_cron_rejected() {
+        let rec = Some("99 * * * *".to_string());
+        assert!(validate_window_dto("w", "all", &None, 1000, 2000, &rec).is_err());
+    }
+
+    #[test]
+    fn valid_five_field_cron_accepted() {
+        let rec = Some("0 2 * * 0".to_string());
+        assert!(validate_window_dto("w", "all", &None, 1000, 2000, &rec).is_ok());
     }
 }
