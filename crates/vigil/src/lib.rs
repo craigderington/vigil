@@ -6,6 +6,7 @@ pub mod cert_scheduler;
 pub mod config;
 pub mod cooldown;
 pub mod db;
+pub mod digest;
 pub mod engine;
 pub mod events;
 pub mod heartbeat;
