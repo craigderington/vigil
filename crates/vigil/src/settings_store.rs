@@ -13,6 +13,10 @@ const DEFAULT_CERT_TICK_SECONDS: i64 = 60;
 const DEFAULT_CERT_CONCURRENCY: i64 = 5;
 const DEFAULT_HEARTBEAT_TICK_SECONDS: i64 = 20;
 const DEFAULT_MAINTENANCE_TICK_SECONDS: i64 = 30;
+const DEFAULT_RENOTIFY_HOURS: i64 = 6;
+const DEFAULT_RENOTIFY_TICK_SECONDS: i64 = 300;
+const DEFAULT_DIGEST_TIME: &str = "08:00";
+const DEFAULT_DIGEST_TICK_SECONDS: i64 = 60;
 
 /// Reads `key`, returning `default` if the row is absent.
 pub async fn get(pool: &SqlitePool, key: &str, default: &str) -> String {
@@ -124,4 +128,44 @@ pub async fn maintenance_tick_seconds(pool: &SqlitePool) -> i64 {
         .await
         .parse()
         .unwrap_or(DEFAULT_MAINTENANCE_TICK_SECONDS)
+}
+
+/// `notify.renotify_hours` — reminder cadence for an ongoing outage. 0 disables.
+pub async fn renotify_hours(pool: &SqlitePool) -> i64 {
+    get(pool, "notify.renotify_hours", &DEFAULT_RENOTIFY_HOURS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_RENOTIFY_HOURS)
+}
+
+/// `notify.renotify_tick_seconds` — how often the re-notify scan runs.
+pub async fn renotify_tick_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "notify.renotify_tick_seconds", &DEFAULT_RENOTIFY_TICK_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_RENOTIFY_TICK_SECONDS)
+}
+
+/// `notify.digest_enabled` — daily digest master switch. Stored "1"/"0";
+/// any value other than "1" is false. First boolean settings helper.
+pub async fn digest_enabled(pool: &SqlitePool) -> bool {
+    get(pool, "notify.digest_enabled", "0").await == "1"
+}
+
+/// `notify.digest_time` — "HH:MM" UTC offset into the day the digest fires.
+pub async fn digest_time(pool: &SqlitePool) -> String {
+    get(pool, "notify.digest_time", DEFAULT_DIGEST_TIME).await
+}
+
+/// `notify.digest_tick_seconds` — digest scheduler granularity.
+pub async fn digest_tick_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "notify.digest_tick_seconds", &DEFAULT_DIGEST_TICK_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_DIGEST_TICK_SECONDS)
+}
+
+/// `notify.digest_recipients` — email channel ids, stored as a JSON array string.
+pub async fn digest_recipients(pool: &SqlitePool) -> Vec<i64> {
+    serde_json::from_str(&get(pool, "notify.digest_recipients", "[]").await).unwrap_or_default()
 }
