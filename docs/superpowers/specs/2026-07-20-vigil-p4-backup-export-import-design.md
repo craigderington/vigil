@@ -187,7 +187,9 @@ reversible until the final `COMMIT`:
 - **WAL/ATTACH robustness note:** if §5.3 migrated the file, dropping that pool checkpoints its
   WAL back into the file before ATTACH, so a fresh ATTACH sees complete data (we only ever **read**
   `backup.*` and **write** `main.*`, so main's atomicity is unaffected by the attached DB's journal
-  mode). The round-trip test (§12) is the guard. If in-process ATTACH of a WAL file ever proves
+  mode). The **older-backup-upgrade test** (§12 — imports a crafted v5 DB so `migrated=true`) is
+  the guard that actually exercises this migrate-then-ATTACH path; the round-trip test covers the
+  same-version ATTACH. If in-process ATTACH of a WAL file ever proves
   troublesome, the equivalent fallback preserving the same atomic-replace intent is: open the
   import file as a second read pool and, within the single `main` transaction, `SELECT`-then-batch-
   `INSERT` each table's rows instead of `INSERT … SELECT FROM backup`. Prefer ATTACH; fall back
@@ -241,9 +243,11 @@ the path.
 - **`app.rs`:** add `pub db_path: std::sync::Arc<str>` to `AppState`.
 - **`main.rs::serve`:** `db_path: cfg.db_path.clone().into()` when constructing `AppState`.
 - **`tests/common/mod.rs`:** thread the tempdir DB path into the 3 constructors (`test_state`,
-  `test_state_offline`, `test_state_failing_transport`). Cleanest: have `fresh_pool()` also return
-  the path string (`(pool, dir, String)`) and set `db_path: path.into()` in each. (All call sites
-  are in this one file.)
+  `test_state_offline`, `test_state_failing_transport`). **Do NOT widen `fresh_pool()`'s return
+  type** — it is called as a 2-tuple by six sites in *other* test files (`rollup.rs`,
+  `maintenance.rs`, `settings.rs`, `settings_p43.rs`), which a signature change would break.
+  Instead derive `db_path` inside each constructor from the same path `fresh_pool` opened
+  (`dir.path().join("t.db")`) and set `db_path: db_path.into()`.
 - Handlers derive `let data_dir = std::path::Path::new(&*state.db_path).parent()` (fallback to
   `.` if none). Temp/snapshot files are siblings of `vigil.db`.
 - **`db.rs`:** add `pub fn current_schema_version() -> i64 { MIGRATIONS.last().map(|(v,_)| *v).unwrap_or(0) }`.
@@ -348,8 +352,10 @@ Monthly-reports blocks:
 - **pre-import snapshot created:** after a successful import, a `pre-import-*.db` file exists in
   the test DB's directory (assert via the tempdir path).
 - **info readout:** `GET /api/backup/info` → the current `schema_version` and plausible counts.
-- **older-backup upgrade (optional/if cheap):** a v5 DB imported into a v6 app is migrated to v6
-  then replaced (asserts `migrated: true`); or documented as covered by the migration runner.
+- **older-backup upgrade (required):** a crafted v5 DB (a v6 DB minus the reports table + its v6
+  migration marker) imported into a v6 app is migrated to v6 then replaced — asserts
+  `migrated: true`, `backup_version == 5`, and the older backup's monitor is present. This is the
+  only test exercising the §5.3 migrate step + §5.5 ATTACH-of-a-freshly-migrated file.
 - **unit — `clear_schedule`:** heap emptied, `in_flight` preserved; a re-seed after an in-flight
   `take_due` does not hand the id out again until `complete` (mirrors the existing
   `remove_does_not_clear_in_flight_no_double_fire` test).
