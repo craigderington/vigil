@@ -41,7 +41,7 @@ button{font-family:inherit;color:inherit}
 .rail-item[aria-current="page"]{background:var(--bg-surface-2);color:var(--accent);border-color:var(--border-default)}
 .rail-icon{width:20px;height:20px;display:block}
 
-.rail-summary{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:20px;line-height:1}
+.rail-summary{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:14px;line-height:1}
 .rail-summary .stat{display:flex;align-items:center;gap:3px}
 .rail-summary .up{color:var(--up)}
 .rail-summary .down{color:var(--down)}
