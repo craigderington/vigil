@@ -1,13 +1,12 @@
 #[tokio::test]
 async fn migration_0005_applies_on_fresh_and_v4() {
-    // fresh DB: connect() applies 1, 2, 3, 4, then 5
+    // fresh DB: connect() applies every migration in order (1, 2, 3, 4, 5, ...
+    // and whatever is newest — 6 as of P4.4 task 1). This test only cares
+    // that 0005 (specifically) applied, so it asserts on the version-5 row
+    // below rather than on MAX(version), which later migrations will move
+    // (same precedent as migrate3.rs / migrate4.rs).
     let d = tempfile::tempdir().unwrap();
     let pool = vigil::db::connect(d.path().join("f.db").to_str().unwrap()).await.unwrap();
-    let v: i64 = sqlx::query_scalar("SELECT MAX(version) FROM schema_migrations")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(v, 5);
     // maintenance_windows table is selectable
     sqlx::query("SELECT id, name, scope, target_ref, starts_at, ends_at, recurrence, suppress, is_active, created_at FROM maintenance_windows")
         .fetch_optional(&pool)
@@ -66,12 +65,23 @@ async fn upgrade_from_v4_db_applies_only_0005_and_preserves_data() {
         .unwrap();
         pool.close().await;
     }
-    // 2) Connect via the real version-ordered runner — must apply ONLY 0005.
+    // 2) Connect via the real version-ordered runner — must apply every
+    //    migration newer than 4 (0005 onward; 0006 as of P4.4 task 1), and
+    //    must NOT re-apply 0001-0004. This test only cares that 0005
+    //    (specifically) applied, so it asserts on the version-5 row rather
+    //    than on MAX(version)/COUNT(*), which later migrations will move
+    //    (same precedent as migrate3.rs / migrate4.rs).
     let pool = vigil::db::connect(&ps).await.unwrap();
-    let maxv: i64 = sqlx::query_scalar("SELECT MAX(version) FROM schema_migrations").fetch_one(&pool).await.unwrap();
-    assert_eq!(maxv, 5);
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations").fetch_one(&pool).await.unwrap();
-    assert_eq!(count, 5, "exactly versions 1-5 recorded (0001-0004 not re-applied)");
+    let n05: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations WHERE version=5")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n05, 1, "version 5 recorded");
+    let n1234: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM schema_migrations WHERE version IN (1,2,3,4)")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n1234, 4, "versions 1-4 still recorded exactly once each (not re-applied)");
     // 0001-0004 did NOT re-run: a re-run would DROP/recreate tables and lose
     // the legacy row.
     let legacy: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM monitors WHERE name='legacy'").fetch_one(&pool).await.unwrap();

@@ -16,6 +16,7 @@ pub mod models;
 pub mod notify;
 pub mod probe;
 pub mod renotify;
+pub mod report;
 pub mod rollup;
 pub mod scheduler;
 pub mod secrets;
