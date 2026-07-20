@@ -98,7 +98,13 @@ pub async fn send_report_email(state: &AppState, report: &Report) -> SendOutcome
         let _ = log_report(state, None, false, Some("no deliverable email recipients")).await;
         return SendOutcome::NothingToSend;
     }
-    let summary: compute::ReportSummary = serde_json::from_str(&report.summary_json).unwrap_or_else(|_| panic!("report summary_json must parse"));
+    let summary: compute::ReportSummary = match serde_json::from_str(&report.summary_json) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = log_report(state, None, false, Some(&format!("unparseable report summary_json: {e}"))).await;
+            return SendOutcome::AllFailed;
+        }
+    };
     let html = html::render_html(&summary);
     let subject = format!("Vigil monthly report — {} — {} uptime", report.label,
         summary.fleet.uptime_pct.map(|p| format!("{p:.2}%")).unwrap_or_else(|| "n/a".into()));

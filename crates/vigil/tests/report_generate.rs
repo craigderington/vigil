@@ -51,4 +51,23 @@ async fn email_all_failed() {
     vigil::settings_store::set(&env.state.db, "report_recipients", &format!("[{cid}]")).await.unwrap();
     let r = generate(&env.state, "2026-03").await.unwrap();
     assert!(matches!(send_report_email(&env.state, &r).await, SendOutcome::AllFailed));
+    // A total send failure must NOT flag the report emailed, and must leave an audit trail.
+    let emailed: Option<i64> = sqlx::query_scalar("SELECT emailed_at FROM reports WHERE id=?").bind(r.id).fetch_one(&env.state.db).await.unwrap();
+    assert!(emailed.is_none(), "emailed_at stays NULL when every send fails");
+    let failed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_log WHERE trigger='report' AND success=0").fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(failed, 1, "the failed send leaves a report audit row");
+}
+
+#[tokio::test]
+async fn regenerate_clears_emailed_at() {
+    let env = test_state().await;
+    let r = generate(&env.state, "2026-03").await.unwrap();
+    // Simulate a prior successful email of this report.
+    sqlx::query("UPDATE reports SET emailed_at = 123 WHERE id = ?").bind(r.id).execute(&env.state.db).await.unwrap();
+    // Regenerating the SAME period overwrites the one row and clears emailed_at.
+    let r2 = generate(&env.state, "2026-03").await.unwrap();
+    assert_eq!(r.id, r2.id, "same month → same row");
+    assert!(r2.emailed_at.is_none(), "the UPSERT's emailed_at=NULL clause must clear a prior email marker");
+    let emailed: Option<i64> = sqlx::query_scalar("SELECT emailed_at FROM reports WHERE id=?").bind(r.id).fetch_one(&env.state.db).await.unwrap();
+    assert!(emailed.is_none());
 }
