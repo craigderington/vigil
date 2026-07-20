@@ -27,6 +27,10 @@ async fn current_settings(state: &AppState) -> Value {
         "cooldown_minutes": settings_store::cooldown_minutes(&state.db).await,
         "retention_days": settings_store::retention_days(&state.db).await,
         "accent": settings_store::get(&state.db, "appearance.accent", "#3FC8E4").await,
+        "renotify_hours": settings_store::renotify_hours(&state.db).await,
+        "digest_enabled": settings_store::digest_enabled(&state.db).await,
+        "digest_time": settings_store::digest_time(&state.db).await,
+        "digest_recipients": settings_store::digest_recipients(&state.db).await,
     })
 }
 
@@ -37,6 +41,10 @@ pub struct UpdateSettingsDto {
     pub cooldown_minutes: Option<i64>,
     pub retention_days: Option<i64>,
     pub accent: Option<String>,
+    pub renotify_hours: Option<i64>,
+    pub digest_enabled: Option<bool>,
+    pub digest_time: Option<String>,
+    pub digest_recipients: Option<Value>,
 }
 
 pub async fn update_settings(
@@ -66,6 +74,31 @@ pub async fn update_settings(
     }
     if let Some(accent) = dto.accent {
         settings_store::set(&state.db, "appearance.accent", &accent)
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(h) = dto.renotify_hours {
+        settings_store::set(&state.db, "notify.renotify_hours", &h.to_string())
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(e) = dto.digest_enabled {
+        settings_store::set(&state.db, "notify.digest_enabled", if e { "1" } else { "0" })
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(t) = dto.digest_time {
+        settings_store::set(&state.db, "notify.digest_time", &t)
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(r) = dto.digest_recipients {
+        let ids: Vec<i64> = match &r {
+            Value::Array(a) => a.iter().filter_map(|v| v.as_i64()).collect(),
+            _ => Vec::new(),
+        };
+        let encoded = serde_json::to_string(&ids).unwrap_or_else(|_| "[]".to_string());
+        settings_store::set(&state.db, "notify.digest_recipients", &encoded)
             .await
             .map_err(set_err)?;
     }
