@@ -55,7 +55,7 @@ async fn settings_put_then_get_roundtrips_digest_recipients_as_array() {
         digest_time: Some("07:15".into()),
         digest_recipients: Some(json!([2, 4])),
     };
-    update_settings(State(state.clone()), Json(dto)).await.unwrap();
+    let _ = update_settings(State(state.clone()), Json(dto)).await.unwrap();
 
     let got = get_settings(State(state)).await.unwrap().0;
     assert_eq!(got["renotify_hours"], 9);
