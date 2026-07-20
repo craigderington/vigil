@@ -62,6 +62,15 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
+/// Formats a UTC epoch second as a human-readable absolute timestamp for
+/// email bodies (e.g. "2026-03-08 02:14 UTC"). Falls back to the raw epoch
+/// string on an out-of-range value (should not happen for real data).
+fn fmt_ts(epoch: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| epoch.to_string())
+}
+
 /// Build the digest for a completed UTC `day` ("YYYY-MM-DD").
 pub async fn build(state: &AppState, day: &str) -> anyhow::Result<DigestSummary> {
     let (ds, de) = rollup::day_bounds(day);
@@ -273,7 +282,7 @@ async fn log_digest(state: &AppState, channel_id: Option<i64>, success: bool, er
 }
 
 /// Render a plaintext digest email. UTC throughout.
-fn render_digest(s: &DigestSummary) -> (String, String) {
+pub fn render_digest(s: &DigestSummary) -> (String, String) {
     let up = s.fleet.uptime_pct.map(|p| format!("{p:.2}%")).unwrap_or_else(|| "n/a".to_string());
     let subject = format!("Vigil daily digest — {} — {} uptime", s.day, up);
     let mut body = String::new();
@@ -290,14 +299,14 @@ fn render_digest(s: &DigestSummary) -> (String, String) {
             let dur = i.duration_seconds.map(|d| format!("{d}s")).unwrap_or_else(|| "ongoing".to_string());
             body.push_str(&format!(
                 "  - {} | started {} | {} | {}\n",
-                i.monitor_name, i.started_at, dur, i.cause.as_deref().unwrap_or("-")
+                i.monitor_name, fmt_ts(i.started_at), dur, i.cause.as_deref().unwrap_or("-")
             ));
         }
     }
     if !s.currently_down.is_empty() {
         body.push_str("\nCurrently down:\n");
         for d in &s.currently_down {
-            body.push_str(&format!("  - {} (since {})\n", d.monitor_name, d.since));
+            body.push_str(&format!("  - {} (since {})\n", d.monitor_name, fmt_ts(d.since)));
         }
     }
     if !s.expirations.is_empty() {

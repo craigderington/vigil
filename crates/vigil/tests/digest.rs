@@ -2,6 +2,7 @@ mod common;
 use common::{test_state, test_state_failing_transport};
 use vigil::digest::build;
 use vigil::digest::{parse_digest_time, seed_marker_if_absent, send, should_send, tick_once, SendOutcome};
+use vigil::digest::{render_digest, DigestDown, DigestIncident, DigestSummary, FleetSummary};
 use vigil::rollup::{day_bounds, day_str};
 
 fn now() -> i64 {
@@ -207,6 +208,41 @@ async fn tick_advances_marker_on_success_but_not_on_all_failed() {
     tick_once(s).await.unwrap();
     assert_eq!(vigil::settings_store::get(&s.db, "notify.digest_last_sent_day", "").await, "",
         "a total send failure must NOT advance the marker (retry next tick)");
+}
+
+#[test]
+fn render_digest_humanizes_absolute_timestamps() {
+    // 2026-03-08T02:14:00Z, chosen so the raw epoch integer is unmistakable
+    // and distinct from its formatted rendering.
+    let started_at: i64 = 1_772_072_040;
+    let summary = DigestSummary {
+        day: "2026-03-08".to_string(),
+        fleet: FleetSummary {
+            uptime_pct: Some(99.5),
+            monitors_total: 1,
+            clean_monitors: 0,
+            incidents: 1,
+            downtime_seconds: 1980,
+        },
+        incidents: vec![DigestIncident {
+            monitor_name: "api.myapp.com".to_string(),
+            started_at,
+            resolved_at: Some(started_at + 1980),
+            duration_seconds: Some(1980),
+            cause: Some("timeout".to_string()),
+            status_code: None,
+            error_message: None,
+        }],
+        currently_down: vec![DigestDown { monitor_name: "db.myapp.com".to_string(), since: started_at }],
+        expirations: vec![],
+    };
+
+    let (_subject, body) = render_digest(&summary);
+
+    assert!(body.contains(" UTC"), "body should contain a humanized UTC timestamp:\n{body}");
+    assert!(!body.contains(&started_at.to_string()), "body must not leak the raw epoch integer:\n{body}");
+    // duration-in-seconds is fine to leave as-is
+    assert!(body.contains("1980s"), "duration should still render in seconds:\n{body}");
 }
 
 #[tokio::test]
