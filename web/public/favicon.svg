@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Matches the left-rail "V" mark: rounded tile (accent-weak over the
+       sunken navy resolves to #0b1e2e) + a bold cyan (--accent) V, drawn as
+       a vector path so it stays crisp at favicon sizes regardless of fonts. -->
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="#0b1e2e"/>
+  <rect x="1" y="1" width="30" height="30" rx="8" fill="none" stroke="#3FC8E4" stroke-opacity="0.3" stroke-width="1.25"/>
+  <path d="M6.5 8.5 L16 24 L25.5 8.5 L21 8.5 L16 18 L11 8.5 Z" fill="#3FC8E4"/>
+</svg>
