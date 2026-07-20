@@ -228,27 +228,48 @@ pub async fn deliver(
     Ok(())
 }
 
+/// Shared email-send: parse an `EmailChannelConfig` JSON, build the SMTP
+/// config + message, and hand off to the transport. Used by both `deliver`'s
+/// email arm and the daily digest (which bypasses `deliver`), so the two
+/// never diverge (incl. the `username`/`from` handling).
+pub async fn send_email_via_channel(
+    transport: &dyn crate::notify::Transport,
+    config_json: &str,
+    subject: &str,
+    body_text: &str,
+    body_html: Option<String>,
+) -> anyhow::Result<()> {
+    let cfg: EmailChannelConfig = serde_json::from_str(config_json)?;
+    let smtp_cfg = SmtpConfig {
+        host: cfg.host,
+        port: cfg.port,
+        security: cfg.security,
+        username: cfg.username,
+    };
+    let email_msg = EmailMsg {
+        to: cfg.to,
+        from: cfg.from,
+        subject: subject.to_string(),
+        body_text: body_text.to_string(),
+        body_html,
+    };
+    transport.send(&smtp_cfg, &email_msg).await
+}
+
 async fn send_to_channel(
     state: &AppState,
     ch: &AttachedChannel,
     msg: &NotifyMsg,
 ) -> anyhow::Result<()> {
     if ch.channel_type == "email" {
-        let cfg: EmailChannelConfig = serde_json::from_str(&ch.config)?;
-        let smtp_cfg = SmtpConfig {
-            host: cfg.host,
-            port: cfg.port,
-            security: cfg.security,
-            username: cfg.username,
-        };
-        let email_msg = EmailMsg {
-            to: cfg.to,
-            from: cfg.from,
-            subject: msg.subject.clone(),
-            body_text: msg.body.clone(),
-            body_html: msg.body_html.clone(),
-        };
-        state.transport.send(&smtp_cfg, &email_msg).await
+        send_email_via_channel(
+            state.transport.as_ref(),
+            &ch.config,
+            &msg.subject,
+            &msg.body,
+            msg.body_html.clone(),
+        )
+        .await
     } else {
         let config: serde_json::Value = serde_json::from_str(&ch.config)?;
         state.http_sender.send(&ch.channel_type, &config, msg).await
