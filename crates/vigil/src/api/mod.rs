@@ -14,6 +14,7 @@ pub mod static_assets;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::Router;
@@ -83,4 +84,8 @@ pub fn routes() -> Router<AppState> {
         .route("/reports/:id/email", post(reports::email))
         .route("/backup/export", get(backup::export))
         .route("/backup/info", get(backup::info))
+        .route(
+            "/backup/import",
+            post(backup::import).layer(DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
 }

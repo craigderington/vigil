@@ -102,3 +102,156 @@ pub async fn info(State(state): State<AppState>) -> Result<Json<BackupInfo>, (St
         counts,
     }))
 }
+
+use std::str::FromStr;
+
+use axum::body::Bytes;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::Executor;
+
+use crate::app::SchedCmd;
+
+const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+
+#[derive(Serialize)]
+pub struct ImportResult {
+    pub ok: bool,
+    pub schema_version: i64,
+    pub backup_version: i64,
+    pub migrated: bool,
+    pub pre_import_snapshot: String,
+    pub tables: serde_json::Value, // { table_name: row_count }
+}
+
+fn bad(msg: &str) -> (StatusCode, String) { (StatusCode::BAD_REQUEST, msg.to_string()) }
+fn ise(msg: String) -> (StatusCode, String) { (StatusCode::INTERNAL_SERVER_ERROR, msg) }
+
+pub async fn import(State(state): State<AppState>, body: Bytes) -> Result<Json<ImportResult>, (StatusCode, String)> {
+    // 1. cheap header guard — reject garbage/empty before touching disk
+    if body.len() < 16 || &body[..16] != SQLITE_MAGIC {
+        return Err(bad("not a SQLite database"));
+    }
+
+    let dir = data_dir(&state);
+    let ts = now();
+    let import_path = dir.join(format!(".vigil-import-{ts}-{}.db", rand::random::<u32>()));
+    tokio::fs::write(&import_path, &body).await.map_err(|e| ise(format!("write upload: {e}")))?;
+
+    // helper to remove the temp import file + its WAL sidecars on every exit
+    let cleanup = |p: &Path| {
+        let p = p.to_path_buf();
+        async move {
+            let _ = tokio::fs::remove_file(&p).await;
+            let _ = tokio::fs::remove_file(p.with_extension("db-wal")).await;
+            let _ = tokio::fs::remove_file(p.with_extension("db-shm")).await;
+        }
+    };
+
+    // 2. validate read-only (do NOT auto-create / auto-migrate here)
+    let current = crate::db::current_schema_version();
+    let backup_version: i64 = {
+        let vopts = match SqliteConnectOptions::from_str(&format!("sqlite://{}", import_path.display())) {
+            Ok(o) => o.read_only(true).create_if_missing(false),
+            Err(e) => { cleanup(&import_path).await; return Err(bad(&format!("open backup: {e}"))); }
+        };
+        let vpool = match SqlitePoolOptions::new().max_connections(1).connect_with(vopts).await {
+            Ok(p) => p,
+            Err(_) => { cleanup(&import_path).await; return Err(bad("not a valid database")); }
+        };
+        let v: Result<i64, _> = sqlx::query_scalar("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetch_one(&vpool).await;
+        vpool.close().await;
+        match v {
+            Ok(v) => v,
+            Err(_) => { cleanup(&import_path).await; return Err(bad("not a Vigil backup (no schema_migrations)")); }
+        }
+    };
+    if backup_version == 0 { cleanup(&import_path).await; return Err(bad("empty or invalid backup")); }
+    if backup_version > current {
+        cleanup(&import_path).await;
+        return Err(bad(&format!("backup is from a newer Vigil version (schema v{backup_version}); upgrade Vigil first")));
+    }
+
+    // 3. upgrade an older backup in place, then release its handles before ATTACH
+    let migrated = backup_version < current;
+    if migrated {
+        match crate::db::connect(import_path.to_str().unwrap()).await {
+            Ok(p) => p.close().await,
+            Err(e) => { cleanup(&import_path).await; return Err(ise(format!("migrate backup: {e}"))); }
+        }
+    }
+
+    // 4. pre-import safety snapshot of CURRENT data (kept on disk = the undo).
+    // Random suffix (like the temp files) so two imports in the same second —
+    // or a second import while an earlier snapshot is still on disk — don't
+    // collide with VACUUM INTO's "target must not already exist" rule.
+    let snapshot_name = format!("pre-import-{ts}-{}.db", rand::random::<u32>());
+    let snapshot_path = dir.join(&snapshot_name);
+    if let Err(e) = sqlx::query(&format!("VACUUM INTO '{}'", sql_quote(&snapshot_path))).execute(&state.db).await {
+        cleanup(&import_path).await;
+        return Err(ise(format!("pre-import snapshot: {e}")));
+    }
+
+    // 5. atomic replace on ONE connection (ATTACH + txn must share it)
+    let mut conn = match state.db.acquire().await {
+        Ok(c) => c,
+        Err(e) => { cleanup(&import_path).await; return Err(db_err(e)); }
+    };
+    let tables: Vec<String> = match sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != 'schema_migrations'",
+    ).fetch_all(&mut *conn).await {
+        Ok(t) => t,
+        Err(e) => { cleanup(&import_path).await; return Err(db_err(e)); }
+    };
+
+    if let Err(e) = conn.execute(format!("ATTACH DATABASE '{}' AS backup", sql_quote(&import_path)).as_str()).await {
+        cleanup(&import_path).await;
+        return Err(ise(format!("attach backup: {e}")));
+    }
+    let replaced = replace_all(&mut conn, &tables).await;
+    let _ = conn.execute("DETACH DATABASE backup").await;
+    if let Err(e) = replaced {
+        // the transaction already rolled back inside replace_all; live data intact
+        cleanup(&import_path).await;
+        return Err(ise(format!("import failed, rolled back (no data changed): {e}")));
+    }
+
+    // 6. finalize: per-table counts (for the UI), re-arm scheduler, clean up
+    let mut counts = serde_json::Map::new();
+    for t in &tables {
+        let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM \"{t}\"")).fetch_one(&mut *conn).await.unwrap_or(0);
+        counts.insert(t.clone(), serde_json::json!(n));
+    }
+    drop(conn);
+    cleanup(&import_path).await;
+    let _ = state.sched_tx.send(SchedCmd::Reseed);
+
+    Ok(Json(ImportResult {
+        ok: true,
+        schema_version: current,
+        backup_version,
+        migrated,
+        pre_import_snapshot: snapshot_name,
+        tables: serde_json::Value::Object(counts),
+    }))
+}
+
+/// The destructive part, isolated so a failure anywhere rolls the whole thing
+/// back. Deferred FK = the delete/insert order across tables doesn't matter;
+/// referential integrity is checked once at COMMIT against the complete,
+/// self-consistent imported dataset.
+async fn replace_all(conn: &mut sqlx::SqliteConnection, tables: &[String]) -> Result<(), sqlx::Error> {
+    if let Err(e) = async {
+        conn.execute("BEGIN").await?;
+        conn.execute("PRAGMA defer_foreign_keys=ON").await?;
+        for t in tables {
+            conn.execute(format!("DELETE FROM main.\"{t}\"").as_str()).await?;
+            conn.execute(format!("INSERT INTO main.\"{t}\" SELECT * FROM backup.\"{t}\"").as_str()).await?;
+        }
+        conn.execute("COMMIT").await?;
+        Ok::<(), sqlx::Error>(())
+    }.await {
+        let _ = conn.execute("ROLLBACK").await;
+        return Err(e);
+    }
+    Ok(())
+}
