@@ -13,6 +13,9 @@ pub struct AppState {
     pub http_sender: Arc<dyn crate::notify::HttpSender>,
     pub sched_tx: tokio::sync::mpsc::UnboundedSender<SchedCmd>,
     pub anchor: Arc<crate::anchor::AnchorGate>,
+    /// Filesystem path of the live SQLite DB (e.g. `/data/vigil.db`). Backup
+    /// export/import derive their temp + snapshot dir from this path's parent.
+    pub db_path: Arc<str>,
 }
 
 /// Commands sent to the scheduler task: recompute a monitor's schedule
@@ -27,6 +30,9 @@ pub enum SchedCmd {
     Remove(i64),
     CheckNow(i64),
     Complete(i64),
+    /// Full DB was replaced (backup import): drop the in-memory schedule and
+    /// re-seed it from the new `monitors` rows. Preserves in-flight guards.
+    Reseed,
 }
 
 /// A router exposing only `/healthz`. Used by the Docker `HEALTHCHECK`

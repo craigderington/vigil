@@ -21,6 +21,7 @@ pub async fn fresh_pool() -> (sqlx::SqlitePool, tempfile::TempDir) {
 
 pub async fn test_state() -> TestEnv {
     let (pool, dir) = fresh_pool().await;
+    let db_path = dir.path().join("t.db").to_str().unwrap().to_string();
     let sent = Arc::new(Mutex::new(Vec::new()));
     let sent_http = Arc::new(Mutex::new(Vec::new()));
     let (bus, _busrx) = tokio::sync::broadcast::channel(64);
@@ -33,6 +34,7 @@ pub async fn test_state() -> TestEnv {
         http_sender: Arc::new(RecordingHttpSender { sent_http: sent_http.clone() }),
         sched_tx: tx,
         anchor,
+        db_path: db_path.into(),
     };
     TestEnv { state, sent, sent_http, _rx: rx, _dir: dir }
 }
@@ -42,6 +44,7 @@ pub async fn test_state() -> TestEnv {
 /// returns `Offline` immediately (no TTL-driven re-probe needed).
 pub async fn test_state_offline() -> TestEnv {
     let (pool, dir) = fresh_pool().await;
+    let db_path = dir.path().join("t.db").to_str().unwrap().to_string();
     let sent = Arc::new(Mutex::new(Vec::new()));
     let sent_http = Arc::new(Mutex::new(Vec::new()));
     let (bus, _busrx) = tokio::sync::broadcast::channel(64);
@@ -55,6 +58,7 @@ pub async fn test_state_offline() -> TestEnv {
         http_sender: Arc::new(RecordingHttpSender { sent_http: sent_http.clone() }),
         sched_tx: tx,
         anchor,
+        db_path: db_path.into(),
     };
     TestEnv { state, sent, sent_http, _rx: rx, _dir: dir }
 }
@@ -168,6 +172,7 @@ impl vigil::notify::Transport for FailingTransport {
 /// A TestEnv whose transport ALWAYS errors (for the all-failed digest path).
 pub async fn test_state_failing_transport() -> TestEnv {
     let (pool, dir) = fresh_pool().await;
+    let db_path = dir.path().join("t.db").to_str().unwrap().to_string();
     let sent = Arc::new(Mutex::new(Vec::new()));
     let sent_http = Arc::new(Mutex::new(Vec::new()));
     let (bus, _busrx) = tokio::sync::broadcast::channel(64);
@@ -180,6 +185,7 @@ pub async fn test_state_failing_transport() -> TestEnv {
         http_sender: Arc::new(RecordingHttpSender { sent_http: sent_http.clone() }),
         sched_tx: tx,
         anchor,
+        db_path: db_path.into(),
     };
     TestEnv { state, sent, sent_http, _rx: rx, _dir: dir }
 }

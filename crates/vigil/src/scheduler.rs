@@ -121,6 +121,15 @@ impl SchedState {
     pub fn remove(&mut self, id: i64) {
         self.heap = self.heap.drain().filter(|Reverse((_, hid))| *hid != id).collect();
     }
+
+    /// Drop every scheduled heap entry but KEEP the `in_flight` set — used by
+    /// `SchedCmd::Reseed` after a backup import replaces the DB. Preserving
+    /// in-flight guards means a worker mid-probe when the import landed still
+    /// can't double-fire: `catch_up` re-seeds its id, but `take_due` discards
+    /// that entry while the id remains in-flight (cleared only by `Complete`).
+    pub fn clear_schedule(&mut self) {
+        self.heap.clear();
+    }
 }
 
 /// Re-reads a single monitor's `next_run_at`/`is_paused`/`type` from the DB
@@ -242,6 +251,10 @@ pub async fn run_scheduler(
                     Some(SchedCmd::Remove(id)) => {
                         sched.remove(id);
                     }
+                    Some(SchedCmd::Reseed) => {
+                        sched.clear_schedule();
+                        catch_up(&state.db, &mut sched).await;
+                    }
                     None => break,
                 }
             }
@@ -309,5 +322,21 @@ mod tests {
         s.complete(1);
         s.schedule(1, 0); // worker finished
         assert_eq!(s.take_due(10), Some(1), "safe to run again after Complete");
+    }
+
+    #[test]
+    fn clear_schedule_empties_heap_keeps_inflight() {
+        let mut s = SchedState::new();
+        s.schedule(1, 0);
+        assert_eq!(s.take_due(10), Some(1)); // id 1 now in-flight
+        s.schedule(2, 0); // a second, not-yet-fired entry
+        s.clear_schedule(); // e.g. a DB import landed
+        assert_eq!(s.take_due(10), None, "heap cleared: nothing left to fire");
+        // in_flight preserved: re-seeding id 1 must NOT hand it out again until Complete
+        s.schedule(1, 0);
+        assert_eq!(s.take_due(10), None, "in-flight id 1 must not double-fire after clear+reseed");
+        s.complete(1);
+        s.schedule(1, 0);
+        assert_eq!(s.take_due(10), Some(1), "after Complete it can run again");
     }
 }

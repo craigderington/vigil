@@ -76,6 +76,7 @@ async fn serve() {
         http_sender,
         sched_tx,
         anchor: anchor.clone(),
+        db_path: cfg.db_path.clone().into(),
     };
 
     let sem = Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrency));

@@ -15,6 +15,13 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, include_str!("../migrations/0006_reports.sql")),
 ];
 
+/// The highest migration version this build knows about — the schema version
+/// a fresh `connect()` brings a DB to. Used by the backup import to gate
+/// version-mismatched uploads and to report the current version.
+pub fn current_schema_version() -> i64 {
+    MIGRATIONS.last().map(|(v, _)| *v).unwrap_or(0)
+}
+
 pub async fn connect(db_path: &str) -> anyhow::Result<sqlx::SqlitePool> {
     let opts = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))?
         .create_if_missing(true)
@@ -68,4 +75,12 @@ async fn run_migrations(pool: &sqlx::SqlitePool) -> anyhow::Result<()> {
         tx.commit().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn current_schema_version_is_latest_migration() {
+        assert_eq!(super::current_schema_version(), 6);
+    }
 }
