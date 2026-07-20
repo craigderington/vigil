@@ -58,14 +58,14 @@ pub struct DigestSummary {
     pub expirations: Vec<DigestExpiration>,
 }
 
-fn round2(x: f64) -> f64 {
+pub fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
 /// Formats a UTC epoch second as a human-readable absolute timestamp for
 /// email bodies (e.g. "2026-03-08 02:14 UTC"). Falls back to the raw epoch
 /// string on an out-of-range value (should not happen for real data).
-fn fmt_ts(epoch: i64) -> String {
+pub fn fmt_ts(epoch: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
         .unwrap_or_else(|| epoch.to_string())

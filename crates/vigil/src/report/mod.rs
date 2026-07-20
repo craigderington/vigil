@@ -61,8 +61,8 @@ pub fn next_month(period: &str) -> String {
     f.checked_add_months(chrono::Months::new(1)).unwrap_or(f).format("%Y-%m").to_string()
 }
 
-// (`generate` + `send_report_email` are added in Task 4; `ReportSummary` + sub-structs
-//  in Task 2 live in `compute.rs` and are re-exported below once they exist.)
+// (`generate` + `send_report_email` are added in Task 4.)
+pub use compute::{compute, fleet_uptime_for, ExpiryItem, FleetReport, LongestOutage, MonitorReport, ReportIncident, ReportSummary};
 
 #[cfg(test)]
 mod tests {
