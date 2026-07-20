@@ -391,3 +391,29 @@ export function previewMaintenanceWindow(body: {
     body: JSON.stringify(body),
   }).then((r) => json(r));
 }
+
+export interface BackupInfo {
+  schema_version: number;
+  db_size_bytes: number;
+  generated_at: number;
+  counts: { monitors: number; incidents: number; checks: number; reports: number; channels: number };
+}
+
+export interface ImportResult {
+  ok: boolean;
+  schema_version: number;
+  backup_version: number;
+  migrated: boolean;
+  pre_import_snapshot: string;
+  tables: Record<string, number>;
+}
+
+export function getBackupInfo(): Promise<BackupInfo> {
+  return fetch("/api/backup/info").then((r) => json(r));
+}
+
+/** POSTs the raw file bytes as the request body (matches the Bytes extractor
+ *  on the backend). Throws the server's message on a non-2xx response. */
+export function importBackup(file: File): Promise<ImportResult> {
+  return fetch("/api/backup/import", { method: "POST", body: file }).then((r) => json(r));
+}

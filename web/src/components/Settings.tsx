@@ -89,6 +89,12 @@ const Settings: Component = () => {
   const [retentionSaving, setRetentionSaving] = createSignal(false);
   const [retentionSaved, setRetentionSaved] = createSignal(false);
 
+  const [backupInfo, setBackupInfo] = createSignal<api.BackupInfo | null>(null);
+  const [importFile, setImportFile] = createSignal<File | null>(null);
+  const [importConfirming, setImportConfirming] = createSignal(false);
+  const [importBusy, setImportBusy] = createSignal(false);
+  const [importError, setImportError] = createSignal<string | null>(null);
+
   const [renotifyHours, setRenotifyHours] = createSignal<number>(6);
   const [renotifySaving, setRenotifySaving] = createSignal(false);
   const [renotifySaved, setRenotifySaved] = createSignal(false);
@@ -178,6 +184,12 @@ const Settings: Component = () => {
       setReportRecipients(Array.isArray(s?.report_recipients) ? s.report_recipients : []);
     } catch {
       // stay on defaults
+    }
+
+    try {
+      setBackupInfo(await api.getBackupInfo());
+    } catch {
+      // backup info is best-effort; the section still renders its actions
     }
   });
 
@@ -372,6 +384,22 @@ const Settings: Component = () => {
       // leave the field as typed so the operator can retry
     } finally {
       setRetentionSaving(false);
+    }
+  }
+
+  async function handleImportConfirmed() {
+    const file = importFile();
+    if (!file) return;
+    setImportBusy(true);
+    setImportError(null);
+    try {
+      await api.importBackup(file);
+      // Full DB was replaced — reload so every screen reflects the new data.
+      window.location.reload();
+    } catch (e: any) {
+      setImportError(e?.message ?? "Import failed");
+      setImportBusy(false);
+      setImportConfirming(false);
     }
   }
 
@@ -805,6 +833,73 @@ const Settings: Component = () => {
         </div>
         <Show when={retentionSaved()}>
           <div class="test-result mono">Saved.</div>
+        </Show>
+      </section>
+
+      <section class="form-section settings-section">
+        <h3 class="form-section-title">Backup &amp; restore</h3>
+        <Show when={backupInfo()}>
+          {(info) => (
+            <p class="settings-note mono">
+              schema v{info().schema_version} · {info().counts.monitors} monitors ·{" "}
+              {info().counts.incidents} incidents · {info().counts.channels} channels ·{" "}
+              ~{Math.round(info().db_size_bytes / 1024)} KB
+            </p>
+          )}
+        </Show>
+
+        <div class="form-field">
+          <a class="btn-accent" href="/api/backup/export" download="vigil-backup.db">
+            Download backup
+          </a>
+          <p class="settings-note">
+            Full snapshot including channel secrets — store it securely. The SMTP password is not
+            included (it lives in a Docker secret).
+          </p>
+        </div>
+
+        <div class="form-field">
+          <label for="backup-import-file">Choose backup file</label>
+          <input
+            id="backup-import-file"
+            type="file"
+            accept=".db,.sqlite"
+            onChange={(e) => {
+              setImportFile(e.currentTarget.files?.[0] ?? null);
+              setImportConfirming(false);
+              setImportError(null);
+            }}
+          />
+        </div>
+
+        <div class="detail-actions">
+          <button
+            type="button"
+            class="btn-accent"
+            disabled={!importFile() || importBusy()}
+            onClick={() => setImportConfirming(true)}
+          >
+            Import &amp; replace
+          </button>
+        </div>
+
+        <Show when={importConfirming()}>
+          <div class="settings-note">
+            This <strong>erases all current data</strong> and replaces it with the backup. A safety
+            snapshot is saved to <code>/data</code> first. Anchor-host changes need a restart.
+          </div>
+          <div class="detail-actions">
+            <button type="button" class="btn-ghost danger" disabled={importBusy()} onClick={handleImportConfirmed}>
+              {importBusy() ? "Importing…" : "Yes, replace everything"}
+            </button>
+            <button type="button" class="btn-ghost" disabled={importBusy()} onClick={() => setImportConfirming(false)}>
+              Cancel
+            </button>
+          </div>
+        </Show>
+
+        <Show when={importError()}>
+          <div class="test-result mono">{importError()}</div>
         </Show>
       </section>
 
