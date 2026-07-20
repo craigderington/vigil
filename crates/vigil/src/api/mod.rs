@@ -6,6 +6,7 @@ pub mod channels;
 pub mod incidents;
 pub mod maintenance;
 pub mod monitors;
+pub mod reports;
 pub mod settings;
 pub mod sse;
 pub mod static_assets;
@@ -74,4 +75,9 @@ pub fn routes() -> Router<AppState> {
             "/settings",
             get(settings::get_settings).put(settings::update_settings),
         )
+        .route("/reports", get(reports::list))
+        .route("/reports/generate", post(reports::generate))
+        .route("/reports/:id", get(reports::get_one).delete(reports::delete))
+        .route("/reports/:id/html", get(reports::html))
+        .route("/reports/:id/email", post(reports::email))
 }
