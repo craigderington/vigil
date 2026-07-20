@@ -156,6 +156,34 @@ pub async fn seed_monitor_with_webhook_channel(pool: &sqlx::SqlitePool) -> i64 {
     mid
 }
 
+pub struct FailingTransport;
+
+#[async_trait::async_trait]
+impl vigil::notify::Transport for FailingTransport {
+    async fn send(&self, _cfg: &SmtpConfig, _msg: &EmailMsg) -> anyhow::Result<()> {
+        anyhow::bail!("smtp down")
+    }
+}
+
+/// A TestEnv whose transport ALWAYS errors (for the all-failed digest path).
+pub async fn test_state_failing_transport() -> TestEnv {
+    let (pool, dir) = fresh_pool().await;
+    let sent = Arc::new(Mutex::new(Vec::new()));
+    let sent_http = Arc::new(Mutex::new(Vec::new()));
+    let (bus, _busrx) = tokio::sync::broadcast::channel(64);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let anchor = Arc::new(vigil::anchor::AnchorGate::with_prober(bus.clone(), Box::new(|| true)));
+    let state = AppState {
+        db: pool,
+        bus,
+        transport: Arc::new(FailingTransport),
+        http_sender: Arc::new(RecordingHttpSender { sent_http: sent_http.clone() }),
+        sched_tx: tx,
+        anchor,
+    };
+    TestEnv { state, sent, sent_http, _rx: rx, _dir: dir }
+}
+
 pub fn ctx_with(name: &str, url: &str, code: Option<i64>) -> TemplateCtx {
     TemplateCtx {
         monitor_name: name.into(),

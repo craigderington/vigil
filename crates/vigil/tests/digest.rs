@@ -1,6 +1,7 @@
 mod common;
-use common::test_state;
+use common::{test_state, test_state_failing_transport};
 use vigil::digest::build;
+use vigil::digest::{parse_digest_time, seed_marker_if_absent, send, should_send, tick_once, SendOutcome};
 use vigil::rollup::{day_bounds, day_str};
 
 fn now() -> i64 {
@@ -115,4 +116,107 @@ async fn quiet_day_is_all_green_and_sendable() {
     assert_eq!(s.fleet.clean_monitors, 1);
     assert!(s.incidents.is_empty());
     assert!(s.currently_down.is_empty());
+}
+
+#[test]
+fn parse_digest_time_and_should_send() {
+    assert_eq!(parse_digest_time("08:00"), 8 * 3600);
+    assert_eq!(parse_digest_time("07:30"), 7 * 3600 + 1800);
+    assert_eq!(parse_digest_time("nonsense"), 8 * 3600); // fallback
+    assert_eq!(parse_digest_time("99:99"), 8 * 3600); // out of range → fallback
+
+    let (_d, ds, _de) = yesterday(); // reuse helper; ds is a day start
+    // today at fire offset 0: any time in today >= today_start
+    let today = day_str(now());
+    let (today_start, _) = day_bounds(&today);
+    assert!(should_send(today_start + 10, &today, "", 0));
+    assert!(!should_send(today_start + 10, &today, &today, 0), "already sent today");
+    assert!(!should_send(today_start - 5, &today, "", 10), "before fire time");
+    let _ = ds;
+}
+
+#[tokio::test]
+async fn send_fans_out_to_email_recipients_and_logs() {
+    let env = test_state().await;
+    // one active email channel
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO notification_channels (name, type, config, is_active, created_at) \
+         VALUES ('e','email','{\"host\":\"h\",\"port\":25,\"security\":\"none\",\"from\":\"f@b\",\"to\":[\"a@b\"]}',1,0) RETURNING id",
+    ).fetch_one(&env.state.db).await.unwrap();
+    vigil::settings_store::set(&env.state.db, "notify.digest_recipients", &format!("[{cid}]")).await.unwrap();
+
+    let summary = build(&env.state, &day_str(now() - 86_400)).await.unwrap();
+    let outcome = send(&env.state, &summary).await;
+    assert!(matches!(outcome, SendOutcome::Delivered));
+    assert_eq!(env.sent.lock().unwrap().len(), 1);
+    let logged: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_log WHERE trigger = 'digest' AND success = 1")
+        .fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(logged, 1);
+}
+
+#[tokio::test]
+async fn send_with_no_recipients_audits_and_returns_nothing_to_send() {
+    let env = test_state().await; // digest_recipients default []
+    let summary = build(&env.state, &day_str(now() - 86_400)).await.unwrap();
+    let outcome = send(&env.state, &summary).await;
+    assert!(matches!(outcome, SendOutcome::NothingToSend));
+    let logged: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM notification_log WHERE trigger = 'digest' AND success = 0 AND error = 'no deliverable email recipients'",
+    ).fetch_one(&env.state.db).await.unwrap();
+    assert_eq!(logged, 1, "the dead switch must leave an audit row");
+}
+
+#[tokio::test]
+async fn send_all_failed_returns_all_failed() {
+    let env = test_state_failing_transport().await;
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO notification_channels (name, type, config, is_active, created_at) \
+         VALUES ('e','email','{\"host\":\"h\",\"port\":25,\"security\":\"none\",\"from\":\"f@b\",\"to\":[\"a@b\"]}',1,0) RETURNING id",
+    ).fetch_one(&env.state.db).await.unwrap();
+    vigil::settings_store::set(&env.state.db, "notify.digest_recipients", &format!("[{cid}]")).await.unwrap();
+    let summary = build(&env.state, &day_str(now() - 86_400)).await.unwrap();
+    assert!(matches!(send(&env.state, &summary).await, SendOutcome::AllFailed));
+}
+
+#[tokio::test]
+async fn tick_advances_marker_on_success_but_not_on_all_failed() {
+    // success path
+    let env = test_state().await;
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO notification_channels (name, type, config, is_active, created_at) \
+         VALUES ('e','email','{\"host\":\"h\",\"port\":25,\"security\":\"none\",\"from\":\"f@b\",\"to\":[\"a@b\"]}',1,0) RETURNING id",
+    ).fetch_one(&env.state.db).await.unwrap();
+    let s = &env.state;
+    vigil::settings_store::set(&s.db, "notify.digest_enabled", "1").await.unwrap();
+    vigil::settings_store::set(&s.db, "notify.digest_time", "00:00").await.unwrap(); // always past
+    vigil::settings_store::set(&s.db, "notify.digest_recipients", &format!("[{cid}]")).await.unwrap();
+    tick_once(s).await.unwrap();
+    let today = day_str(now());
+    assert_eq!(vigil::settings_store::get(&s.db, "notify.digest_last_sent_day", "").await, today);
+
+    // all-failed path: marker must NOT advance
+    let env = test_state_failing_transport().await;
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO notification_channels (name, type, config, is_active, created_at) \
+         VALUES ('e','email','{\"host\":\"h\",\"port\":25,\"security\":\"none\",\"from\":\"f@b\",\"to\":[\"a@b\"]}',1,0) RETURNING id",
+    ).fetch_one(&env.state.db).await.unwrap();
+    let s = &env.state;
+    vigil::settings_store::set(&s.db, "notify.digest_enabled", "1").await.unwrap();
+    vigil::settings_store::set(&s.db, "notify.digest_time", "00:00").await.unwrap();
+    vigil::settings_store::set(&s.db, "notify.digest_recipients", &format!("[{cid}]")).await.unwrap();
+    tick_once(s).await.unwrap();
+    assert_eq!(vigil::settings_store::get(&s.db, "notify.digest_last_sent_day", "").await, "",
+        "a total send failure must NOT advance the marker (retry next tick)");
+}
+
+#[tokio::test]
+async fn seed_marker_only_when_absent() {
+    let env = test_state().await;
+    seed_marker_if_absent(&env.state).await.unwrap();
+    let seeded = vigil::settings_store::get(&env.state.db, "notify.digest_last_sent_day", "").await;
+    assert_eq!(seeded, day_str(now()), "fresh instance seeds today");
+    // a present marker is left untouched
+    vigil::settings_store::set(&env.state.db, "notify.digest_last_sent_day", "2020-01-01").await.unwrap();
+    seed_marker_if_absent(&env.state).await.unwrap();
+    assert_eq!(vigil::settings_store::get(&env.state.db, "notify.digest_last_sent_day", "").await, "2020-01-01");
 }

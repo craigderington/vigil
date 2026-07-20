@@ -3,12 +3,16 @@
 //! + maintenance intervals (NOT the aggregate table, which is untimely at
 //! fire time and does not exclude maintenance). See §4.5 of the spec.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use serde::Serialize;
 
 use crate::app::AppState;
 use crate::maintenance_windows::{self, resolve};
 use crate::models::{DomainInfo, Monitor, SslCert};
+use crate::notify::dispatch;
 use crate::rollup;
+use crate::settings_store;
 use crate::uptime::{self, Span};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -220,4 +224,183 @@ pub async fn build(state: &AppState, day: &str) -> anyhow::Result<DigestSummary>
         currently_down,
         expirations,
     })
+}
+
+fn now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SendOutcome {
+    Delivered,
+    NothingToSend,
+    AllFailed,
+}
+
+/// "HH:MM" (UTC) → seconds into the day. Falls back to 08:00 on any parse error.
+pub fn parse_digest_time(s: &str) -> i64 {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() == 2 {
+        if let (Ok(h), Ok(m)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
+            if (0..24).contains(&h) && (0..60).contains(&m) {
+                return h * 3600 + m * 60;
+            }
+        }
+    }
+    tracing::warn!(input = %s, "invalid digest_time; falling back to 08:00");
+    8 * 3600
+}
+
+/// Pure scheduler decision: fire iff now has passed today's fire instant and
+/// we have not already sent for `today` (lexicographic "YYYY-MM-DD" compare).
+pub fn should_send(now_ts: i64, today: &str, last_sent_day: &str, fire_offset: i64) -> bool {
+    let (today_start, _) = rollup::day_bounds(today);
+    now_ts >= today_start + fire_offset && last_sent_day < today
+}
+
+async fn log_digest(state: &AppState, channel_id: Option<i64>, success: bool, error: Option<&str>) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO notification_log (monitor_id, channel_id, incident_id, trigger, sent_at, success, error) \
+         VALUES (NULL, ?, NULL, 'digest', ?, ?, ?)",
+    )
+    .bind(channel_id)
+    .bind(now())
+    .bind(success)
+    .bind(error)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+/// Render a plaintext digest email. UTC throughout.
+fn render_digest(s: &DigestSummary) -> (String, String) {
+    let up = s.fleet.uptime_pct.map(|p| format!("{p:.2}%")).unwrap_or_else(|| "n/a".to_string());
+    let subject = format!("Vigil daily digest — {} — {} uptime", s.day, up);
+    let mut body = String::new();
+    body.push_str(&format!("Vigil daily digest for {} (UTC)\n\n", s.day));
+    body.push_str(&format!(
+        "Fleet uptime: {up}\nMonitors: {} ({} clean)\nIncidents: {}\nTotal downtime: {}s\n\n",
+        s.fleet.monitors_total, s.fleet.clean_monitors, s.fleet.incidents, s.fleet.downtime_seconds
+    ));
+    if s.incidents.is_empty() {
+        body.push_str("No incidents.\n");
+    } else {
+        body.push_str("Incidents:\n");
+        for i in &s.incidents {
+            let dur = i.duration_seconds.map(|d| format!("{d}s")).unwrap_or_else(|| "ongoing".to_string());
+            body.push_str(&format!(
+                "  - {} | started {} | {} | {}\n",
+                i.monitor_name, i.started_at, dur, i.cause.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    if !s.currently_down.is_empty() {
+        body.push_str("\nCurrently down:\n");
+        for d in &s.currently_down {
+            body.push_str(&format!("  - {} (since {})\n", d.monitor_name, d.since));
+        }
+    }
+    if !s.expirations.is_empty() {
+        body.push_str("\nUpcoming expirations:\n");
+        for e in &s.expirations {
+            let days = e.days_remaining.map(|d| format!("{d}d")).unwrap_or_else(|| "unknown".to_string());
+            body.push_str(&format!("  - {} {} [{}] {}\n", e.monitor_name, e.kind, e.flag, days));
+        }
+    }
+    (subject, body)
+}
+
+/// Send the digest to every active email channel in `notify.digest_recipients`.
+pub async fn send(state: &AppState, summary: &DigestSummary) -> SendOutcome {
+    let ids = settings_store::digest_recipients(&state.db).await;
+    let mut channels: Vec<(i64, String)> = Vec::new();
+    for id in &ids {
+        let cfg: Option<String> = sqlx::query_scalar(
+            "SELECT config FROM notification_channels WHERE id = ? AND type = 'email' AND is_active = 1",
+        )
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        if let Some(cfg) = cfg {
+            channels.push((*id, cfg));
+        }
+    }
+
+    if channels.is_empty() {
+        let _ = log_digest(state, None, false, Some("no deliverable email recipients")).await;
+        tracing::warn!("digest enabled but no deliverable email recipients");
+        return SendOutcome::NothingToSend;
+    }
+
+    let (subject, body) = render_digest(summary);
+    let mut any_ok = false;
+    for (id, cfg) in channels {
+        let r = dispatch::send_email_via_channel(state.transport.as_ref(), &cfg, &subject, &body, None).await;
+        let (ok, err) = match &r {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e.to_string())),
+        };
+        any_ok |= ok;
+        let _ = log_digest(state, Some(id), ok, err.as_deref()).await;
+    }
+    if any_ok {
+        SendOutcome::Delivered
+    } else {
+        SendOutcome::AllFailed
+    }
+}
+
+/// Seed the once-per-day marker to today on a brand-new instance (absent
+/// marker), so a fresh install does not fire for a day it wasn't monitoring.
+pub async fn seed_marker_if_absent(state: &AppState) -> anyhow::Result<()> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'notify.digest_last_sent_day'")
+            .fetch_optional(&state.db)
+            .await?;
+    if existing.is_none() {
+        settings_store::set(&state.db, "notify.digest_last_sent_day", &rollup::day_str(now())).await?;
+    }
+    Ok(())
+}
+
+/// One scheduler evaluation: if due, build yesterday's digest, send it, and
+/// advance the marker ONLY on a delivered / nothing-to-send outcome (a total
+/// send failure leaves the marker so the next tick retries within the day).
+pub async fn tick_once(state: &AppState) -> anyhow::Result<()> {
+    let now_ts = now();
+    let today = rollup::day_str(now_ts);
+    let last = settings_store::get(&state.db, "notify.digest_last_sent_day", "").await;
+    let offset = parse_digest_time(&settings_store::digest_time(&state.db).await);
+    if !should_send(now_ts, &today, &last, offset) {
+        return Ok(());
+    }
+    let yesterday = rollup::day_str(now_ts - 86_400);
+    let summary = build(state, &yesterday).await?;
+    match send(state, &summary).await {
+        SendOutcome::Delivered | SendOutcome::NothingToSend => {
+            settings_store::set(&state.db, "notify.digest_last_sent_day", &today).await?;
+        }
+        SendOutcome::AllFailed => {
+            tracing::warn!("digest send failed for all recipients; will retry next tick");
+        }
+    }
+    Ok(())
+}
+
+/// The digest scheduler loop.
+pub async fn run(state: AppState) {
+    if let Err(error) = seed_marker_if_absent(&state).await {
+        tracing::error!(%error, "digest marker seed failed");
+    }
+    loop {
+        let tick = settings_store::digest_tick_seconds(&state.db).await;
+        if settings_store::digest_enabled(&state.db).await {
+            if let Err(error) = tick_once(&state).await {
+                tracing::error!(%error, "digest tick failed");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(tick.max(1) as u64)).await;
+    }
 }
