@@ -332,6 +332,45 @@ export function deleteMaintenanceWindow(id: number): Promise<{ ok: boolean }> {
   return fetch(`/api/maintenance-windows/${id}`, { method: "DELETE" }).then((r) => json(r));
 }
 
+export interface ReportCard {
+  id: number;
+  label: string;
+  period_start: number;
+  period_end?: number;
+  generated_at: number;
+  emailed_at: number | null;
+  headline: { uptime_pct: number | null; incidents: number | null; downtime_seconds: number | null };
+}
+
+export function listReports(): Promise<ReportCard[]> {
+  return fetch("/api/reports").then((r) => json(r));
+}
+
+export function getReport(id: number): Promise<any> {
+  return fetch(`/api/reports/${id}`).then((r) => json(r));
+}
+
+export function generateReport(period: string): Promise<{ id: number; label: string }> {
+  return fetch("/api/reports/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ period }),
+  }).then((r) => json(r));
+}
+
+/** Returns raw HTML (not JSON) — embedded via `<iframe srcdoc>` in Reports.tsx. */
+export function reportHtml(id: number): Promise<string> {
+  return fetch(`/api/reports/${id}/html`).then((r) => r.text());
+}
+
+export function emailReport(id: number): Promise<{ ok: boolean }> {
+  return fetch(`/api/reports/${id}/email`, { method: "POST" }).then((r) => json(r));
+}
+
+export function deleteReport(id: number): Promise<{ ok: boolean }> {
+  return fetch(`/api/reports/${id}`, { method: "DELETE" }).then((r) => json(r));
+}
+
 export interface MaintenancePreview {
   affected_monitor_ids: number[];
   active_now: boolean | null;

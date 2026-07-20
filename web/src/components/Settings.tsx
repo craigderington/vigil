@@ -99,6 +99,13 @@ const Settings: Component = () => {
   const [digestSaving, setDigestSaving] = createSignal(false);
   const [digestSaved, setDigestSaved] = createSignal(false);
 
+  const [reportAutoGenerate, setReportAutoGenerate] = createSignal<boolean>(true);
+  const [reportDayOfMonth, setReportDayOfMonth] = createSignal<number>(1);
+  const [reportTime, setReportTime] = createSignal<string>("08:00");
+  const [reportRecipients, setReportRecipients] = createSignal<number[]>([]);
+  const [reportSaving, setReportSaving] = createSignal(false);
+  const [reportSaved, setReportSaved] = createSignal(false);
+
   // Multi-type channel manager (Task 12): a list of every channel (any
   // type) plus an "Add channel" form with a type selector and type-specific
   // config fields. The single-email SMTP section above is untouched — this
@@ -165,6 +172,10 @@ const Settings: Component = () => {
       setDigestEnabled(!!s?.digest_enabled);
       setDigestTime(typeof s?.digest_time === "string" ? s.digest_time : "08:00");
       setDigestRecipients(Array.isArray(s?.digest_recipients) ? s.digest_recipients : []);
+      setReportAutoGenerate(s?.report_auto_generate !== false);
+      setReportDayOfMonth(typeof s?.report_day_of_month === "number" ? s.report_day_of_month : 1);
+      setReportTime(typeof s?.report_time === "string" ? s.report_time : "08:00");
+      setReportRecipients(Array.isArray(s?.report_recipients) ? s.report_recipients : []);
     } catch {
       // stay on defaults
     }
@@ -391,6 +402,24 @@ const Settings: Component = () => {
       // leave as typed
     } finally {
       setDigestSaving(false);
+    }
+  }
+
+  async function handleSaveReport() {
+    setReportSaving(true);
+    setReportSaved(false);
+    try {
+      await api.updateSettings({
+        report_auto_generate: reportAutoGenerate(),
+        report_day_of_month: Math.min(31, Math.max(1, Number(reportDayOfMonth()) || 1)),
+        report_time: reportTime(),
+        report_recipients: reportRecipients(),
+      });
+      setReportSaved(true);
+    } catch {
+      // leave as typed
+    } finally {
+      setReportSaving(false);
     }
   }
 
@@ -867,6 +896,84 @@ const Settings: Component = () => {
           </button>
         </div>
         <Show when={digestSaved()}>
+          <div class="test-result mono">Saved.</div>
+        </Show>
+      </section>
+
+      <section class="form-section settings-section">
+        <h3 class="form-section-title">Monthly reports</h3>
+        <p class="settings-note">
+          A report for the month just ended, auto-generated on the configured day and optionally
+          emailed to recipients (§13.3/§13.4).
+        </p>
+        <div class="form-field">
+          <label class="form-checkbox">
+            <input
+              type="checkbox"
+              checked={reportAutoGenerate()}
+              onInput={(e) => {
+                setReportAutoGenerate(e.currentTarget.checked);
+                setReportSaved(false);
+              }}
+            />
+            Auto-generate monthly reports
+          </label>
+        </div>
+        <div class="form-field">
+          <label for="set-report-day">Day of month</label>
+          <input
+            id="set-report-day"
+            type="number"
+            min={1}
+            max={31}
+            value={reportDayOfMonth()}
+            onInput={(e) => {
+              setReportDayOfMonth(Number(e.currentTarget.value) || 1);
+              setReportSaved(false);
+            }}
+          />
+        </div>
+        <div class="form-field">
+          <label for="set-report-time">Send time (HH:MM, UTC)</label>
+          <input
+            id="set-report-time"
+            type="text"
+            placeholder="08:00"
+            value={reportTime()}
+            onInput={(e) => {
+              setReportTime(e.currentTarget.value);
+              setReportSaved(false);
+            }}
+          />
+        </div>
+        <div class="form-field">
+          <label>Recipient email channels</label>
+          <Show when={emailChannels().length === 0}>
+            <p class="settings-note">No email channels yet — add one above.</p>
+          </Show>
+          <For each={emailChannels()}>
+            {(ch) => (
+              <label class="form-checkbox">
+                <input
+                  type="checkbox"
+                  checked={reportRecipients().includes(ch.id)}
+                  onInput={(e) => {
+                    const on = e.currentTarget.checked;
+                    setReportRecipients((prev) => (on ? [...prev, ch.id] : prev.filter((x) => x !== ch.id)));
+                    setReportSaved(false);
+                  }}
+                />
+                {ch.name}
+              </label>
+            )}
+          </For>
+        </div>
+        <div class="detail-actions">
+          <button type="button" class="btn-accent" disabled={reportSaving()} onClick={handleSaveReport}>
+            {reportSaving() ? "Saving…" : "Save report settings"}
+          </button>
+        </div>
+        <Show when={reportSaved()}>
           <div class="test-result mono">Saved.</div>
         </Show>
       </section>

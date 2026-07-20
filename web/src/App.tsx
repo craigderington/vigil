@@ -12,16 +12,17 @@ import MonitorForm from "./components/MonitorForm";
 import Settings from "./components/Settings";
 import Incidents from "./components/Incidents";
 import Maintenance from "./components/Maintenance";
+import Reports from "./components/Reports";
 
 const App: Component = () => {
   const store = createMonitorStore();
   const [query, setQuery] = createSignal("");
   const [statusFilter, setStatusFilter] = createSignal<string | null>(null);
 
-  // Top-level view. "dashboard", "settings", "incidents", and "maintenance"
-  // have real screens; Rail still fires onNavigate for Notifications so a
-  // future screen can hook in, but until then that click just returns to
-  // the dashboard grid — see Rail.tsx.
+  // Top-level view. "dashboard", "settings", "incidents", "maintenance", and
+  // "reports" have real screens; Rail still fires onNavigate for
+  // Notifications so a future screen can hook in, but until then that click
+  // just returns to the dashboard grid — see Rail.tsx.
   const [view, setView] = createSignal<RailView>("dashboard");
 
   const filtered = createMemo(() => {
@@ -79,7 +80,9 @@ const App: Component = () => {
         activeView={view()}
         onNavigate={(key) =>
           setView(
-            key === "settings" || key === "incidents" || key === "maintenance" ? key : "dashboard",
+            key === "settings" || key === "incidents" || key === "maintenance" || key === "reports"
+              ? key
+              : "dashboard",
           )
         }
       />
@@ -129,6 +132,11 @@ const App: Component = () => {
           <Match when={view() === "maintenance"}>
             <div class="app-content">
               <Maintenance />
+            </div>
+          </Match>
+          <Match when={view() === "reports"}>
+            <div class="app-content">
+              <Reports />
             </div>
           </Match>
         </Switch>
