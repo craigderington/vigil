@@ -50,3 +50,31 @@ test("saving a new webhook channel POSTs type=webhook with url in config", async
   const cfg = JSON.parse(posts[0].config);
   expect(cfg.url).toBe("https://hooks.example.com/abc");
 });
+
+test("saving re-notify hours PUTs renotify_hours", async () => {
+  const puts: any[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: any, opts?: any) => {
+      if (url === "/api/settings" && opts?.method === "PUT") {
+        puts.push(JSON.parse(opts.body));
+        return { ok: true, json: async () => ({}) };
+      }
+      // GET /api/settings and GET /api/channels
+      if (url === "/api/settings") {
+        return { ok: true, json: async () => ({ anchors: [], retention_days: 30, renotify_hours: 6, digest_enabled: false, digest_time: "08:00", digest_recipients: [] }) };
+      }
+      return { ok: true, json: async () => [] };
+    }) as any,
+  );
+
+  render(() => <Settings />);
+  const input = await screen.findByLabelText(/re-notify interval/i);
+  fireEvent.input(input, { target: { value: "12" } });
+  fireEvent.click(screen.getByRole("button", { name: /save re-notify/i }));
+
+  await screen.findByText(/saved/i);
+  const put = puts.find((p) => "renotify_hours" in p);
+  expect(put).toBeTruthy();
+  expect(put.renotify_hours).toBe(12);
+});

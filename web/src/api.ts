@@ -92,6 +92,10 @@ export interface Settings {
   cooldown_minutes: number;
   retention_days: number;
   accent: string;
+  renotify_hours: number;
+  digest_enabled: boolean;
+  digest_time: string;
+  digest_recipients: number[];
 }
 
 export function getSettings(): Promise<Settings> {

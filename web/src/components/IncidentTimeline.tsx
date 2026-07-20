@@ -180,6 +180,7 @@ const IncidentTimeline: Component<IncidentTimelineProps> = (props) => {
                     class="btn-ghost btn-sm"
                     disabled={ackingId() === inc.id}
                     onClick={() => acknowledge(inc.id)}
+                    title="Acknowledge (silences re-notify reminders)"
                   >
                     Acknowledge
                   </button>

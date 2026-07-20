@@ -89,6 +89,16 @@ const Settings: Component = () => {
   const [retentionSaving, setRetentionSaving] = createSignal(false);
   const [retentionSaved, setRetentionSaved] = createSignal(false);
 
+  const [renotifyHours, setRenotifyHours] = createSignal<number>(6);
+  const [renotifySaving, setRenotifySaving] = createSignal(false);
+  const [renotifySaved, setRenotifySaved] = createSignal(false);
+
+  const [digestEnabled, setDigestEnabled] = createSignal<boolean>(false);
+  const [digestTime, setDigestTime] = createSignal<string>("08:00");
+  const [digestRecipients, setDigestRecipients] = createSignal<number[]>([]);
+  const [digestSaving, setDigestSaving] = createSignal(false);
+  const [digestSaved, setDigestSaved] = createSignal(false);
+
   // Multi-type channel manager (Task 12): a list of every channel (any
   // type) plus an "Add channel" form with a type selector and type-specific
   // config fields. The single-email SMTP section above is untouched — this
@@ -151,10 +161,19 @@ const Settings: Component = () => {
       const s: any = await api.getSettings();
       setAnchorsText(asArray(s?.anchors).join(", "));
       setRetentionDays(typeof s?.retention_days === "number" ? s.retention_days : DEFAULT_RETENTION_DAYS);
+      setRenotifyHours(typeof s?.renotify_hours === "number" ? s.renotify_hours : 6);
+      setDigestEnabled(!!s?.digest_enabled);
+      setDigestTime(typeof s?.digest_time === "string" ? s.digest_time : "08:00");
+      setDigestRecipients(Array.isArray(s?.digest_recipients) ? s.digest_recipients : []);
     } catch {
       // stay on defaults
     }
   });
+
+  // Recipient checkboxes for the daily digest (§13.3/§13.4) reuse the same
+  // `channels` list already loaded above for the channel manager — no
+  // separate `/api/channels` fetch.
+  const emailChannels = () => channels().filter((c) => c?.type === "email");
 
   function buildEmailConfig() {
     return {
@@ -342,6 +361,36 @@ const Settings: Component = () => {
       // leave the field as typed so the operator can retry
     } finally {
       setRetentionSaving(false);
+    }
+  }
+
+  async function handleSaveRenotify() {
+    setRenotifySaving(true);
+    setRenotifySaved(false);
+    try {
+      await api.updateSettings({ renotify_hours: Math.max(0, Number(renotifyHours()) || 0) });
+      setRenotifySaved(true);
+    } catch {
+      // leave as typed
+    } finally {
+      setRenotifySaving(false);
+    }
+  }
+
+  async function handleSaveDigest() {
+    setDigestSaving(true);
+    setDigestSaved(false);
+    try {
+      await api.updateSettings({
+        digest_enabled: digestEnabled(),
+        digest_time: digestTime(),
+        digest_recipients: digestRecipients(),
+      });
+      setDigestSaved(true);
+    } catch {
+      // leave as typed
+    } finally {
+      setDigestSaving(false);
     }
   }
 
@@ -726,6 +775,98 @@ const Settings: Component = () => {
           </button>
         </div>
         <Show when={retentionSaved()}>
+          <div class="test-result mono">Saved.</div>
+        </Show>
+      </section>
+
+      <section class="form-section settings-section">
+        <h3 class="form-section-title">Re-notify</h3>
+        <p class="settings-note">
+          Reminder emails for an ongoing, unacknowledged outage repeat at this interval until it
+          resolves or is acknowledged.
+        </p>
+        <div class="form-field">
+          <label for="set-renotify">Re-notify interval (hours, 0 = off)</label>
+          <input
+            id="set-renotify"
+            type="number"
+            min={0}
+            value={renotifyHours()}
+            onInput={(e) => {
+              setRenotifyHours(Number(e.currentTarget.value) || 0);
+              setRenotifySaved(false);
+            }}
+          />
+        </div>
+        <div class="detail-actions">
+          <button type="button" class="btn-accent" disabled={renotifySaving()} onClick={handleSaveRenotify}>
+            {renotifySaving() ? "Saving…" : "Save re-notify"}
+          </button>
+        </div>
+        <Show when={renotifySaved()}>
+          <div class="test-result mono">Saved.</div>
+        </Show>
+      </section>
+
+      <section class="form-section settings-section">
+        <h3 class="form-section-title">Daily digest</h3>
+        <p class="settings-note">
+          A daily summary email of uptime, incidents, and upcoming certificate/domain expirations.
+        </p>
+        <div class="form-field">
+          <label class="form-checkbox">
+            <input
+              type="checkbox"
+              checked={digestEnabled()}
+              onInput={(e) => {
+                setDigestEnabled(e.currentTarget.checked);
+                setDigestSaved(false);
+              }}
+            />
+            Enable daily digest
+          </label>
+        </div>
+        <div class="form-field">
+          <label for="set-digest-time">Send time (HH:MM, UTC)</label>
+          <input
+            id="set-digest-time"
+            type="text"
+            placeholder="08:00"
+            value={digestTime()}
+            onInput={(e) => {
+              setDigestTime(e.currentTarget.value);
+              setDigestSaved(false);
+            }}
+          />
+        </div>
+        <div class="form-field">
+          <label>Recipient email channels</label>
+          <Show when={emailChannels().length === 0}>
+            <p class="settings-note">No email channels yet — add one above.</p>
+          </Show>
+          <For each={emailChannels()}>
+            {(ch) => (
+              <label class="form-checkbox">
+                <input
+                  type="checkbox"
+                  checked={digestRecipients().includes(ch.id)}
+                  onInput={(e) => {
+                    const on = e.currentTarget.checked;
+                    setDigestRecipients((prev) => (on ? [...prev, ch.id] : prev.filter((x) => x !== ch.id)));
+                    setDigestSaved(false);
+                  }}
+                />
+                {ch.name}
+              </label>
+            )}
+          </For>
+        </div>
+        <div class="detail-actions">
+          <button type="button" class="btn-accent" disabled={digestSaving()} onClick={handleSaveDigest}>
+            {digestSaving() ? "Saving…" : "Save digest"}
+          </button>
+        </div>
+        <Show when={digestSaved()}>
           <div class="test-result mono">Saved.</div>
         </Show>
       </section>
