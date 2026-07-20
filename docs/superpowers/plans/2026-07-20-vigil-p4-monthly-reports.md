@@ -89,7 +89,7 @@ mod tests {
         // 2026-03: 2026-03-01T00:00Z .. 2026-04-01T00:00Z
         let (s, e) = month_bounds("2026-03");
         assert_eq!(s, 1_772_323_200); // 2026-03-01T00:00:00Z
-        assert_eq!(e, 1_774_915_200); // 2026-04-01T00:00:00Z
+        assert_eq!(e, 1_775_001_600); // 2026-04-01T00:00:00Z (March has 31 days)
         assert_eq!(month_label("2026-03"), "March 2026");
         assert_eq!(month_of(s), "2026-03");
         assert_eq!(month_of(e - 1), "2026-03");
@@ -209,11 +209,16 @@ pub fn next_month(period: &str) -> String {
 //  in Task 2 live in `compute.rs` and are re-exported below once they exist.)
 ```
 
-Add to `crates/vigil/src/lib.rs` alongside the other `pub mod`s:
+**MANDATORY in this same step (else the `pub mod compute/html/scheduler` lines in `mod.rs` fail with `E0583: file not found`):** create the three stub files so `mod.rs` compiles now — Tasks 2/3 fill `compute.rs`/`html.rs`, Task 6 fills `scheduler.rs`:
+```bash
+printf '// filled in Task 2\n' > crates/vigil/src/report/compute.rs
+printf '// filled in Task 3\n' > crates/vigil/src/report/html.rs
+printf '// filled in Task 6\n' > crates/vigil/src/report/scheduler.rs
+```
+Then add to `crates/vigil/src/lib.rs` alongside the other `pub mod`s:
 ```rust
 pub mod report;
 ```
-(Tasks 2/3/4 fill `compute.rs`/`html.rs`/`scheduler.rs`; create empty stubs `pub` files if the `pub mod` lines fail to compile before those tasks, or add the `pub mod` lines per-task. Recommended: create empty `report/compute.rs`, `report/html.rs`, `report/scheduler.rs` now with a single `// filled in Task N` line so `mod.rs` compiles.)
 
 - [ ] **Step 7: Run tests to verify they pass**
 
@@ -373,6 +378,62 @@ async fn delta_uses_prior_month_live() {
     let s = compute(&env.state, "2026-03").await.unwrap();
     assert_eq!(s.fleet.uptime_delta, Some(0.0));
 }
+
+#[tokio::test]
+async fn open_incident_at_period_end_clips_and_marks_down() {
+    // Incident starts inside March and is STILL OPEN (resolved_at NULL) → clips to de,
+    // end_status "down". Exercises clip()'s end branch + end_status_at (finding F).
+    let env = test_state().await;
+    let (ds, de) = month_bounds("2026-03");
+    let mid = seed_http_monitor(&env.state.db, "api").await;
+    seed_month(&env.state.db, mid, "2026-03", "2026-03-31", 50.0, 100.0, 100).await;
+    // opens 1 hour before month-end, never resolves
+    sqlx::query("INSERT INTO incidents (monitor_id, started_at, resolved_at, cause) VALUES (?, ?, NULL, 'timeout')")
+        .bind(mid).bind(de - 3600).execute(&env.state.db).await.unwrap();
+    let s = compute(&env.state, "2026-03").await.unwrap();
+    assert_eq!(s.incidents[0].duration_seconds, Some(3600), "open incident clips to period_end");
+    assert_eq!(s.incidents[0].resolved_at, None);
+    assert_eq!(s.monitors[0].end_status, "down");
+    assert_eq!(s.fleet.longest_outage.as_ref().unwrap().seconds, 3600);
+    let _ = ds;
+}
+
+#[tokio::test]
+async fn p95_computed_when_month_within_retention() {
+    // Raise retention so a RECENT month's raw checks survive → p95 value branch runs
+    // (finding E). Use a month computed from now() to stay within retention + not future.
+    let env = test_state().await;
+    vigil::settings_store::set(&env.state.db, "retention.raw_days", "3650").await.unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    // use the PRIOR month so it is fully in the past (never future)
+    let period = vigil::report::prior_month(&vigil::report::month_of(now));
+    let (ds, _de) = month_bounds(&period);
+    let mid = seed_http_monitor(&env.state.db, "api").await;
+    let day = vigil::rollup::day_str(ds);
+    seed_month(&env.state.db, mid, &period, &day, 100.0, 100.0, 5).await;
+    // 5 checks: 100,110,120,130,500 → p95 index ceil(5*0.95)-1 = 4 → 500
+    for (i, v) in [100, 110, 120, 130, 500].iter().enumerate() {
+        sqlx::query("INSERT INTO checks (monitor_id, checked_at, status, response_time_ms) VALUES (?, ?, 'up', ?)")
+            .bind(mid).bind(ds + 100 + i as i64).bind(v).execute(&env.state.db).await.unwrap();
+    }
+    let s = compute(&env.state, &period).await.unwrap();
+    assert_eq!(s.monitors[0].p95_ms, Some(500));
+}
+
+#[tokio::test]
+async fn monitor_rows_sorted_worst_uptime_first() {
+    let env = test_state().await;
+    let (ds, _de) = month_bounds("2026-03");
+    let good = seed_http_monitor(&env.state.db, "good").await;
+    seed_month(&env.state.db, good, "2026-03", "2026-03-01", 100.0, 100.0, 100).await;
+    let bad = seed_http_monitor(&env.state.db, "bad").await;
+    seed_month(&env.state.db, bad, "2026-03", "2026-03-01", 50.0, 100.0, 100).await;
+    sqlx::query("INSERT INTO incidents (monitor_id, started_at, resolved_at, cause) VALUES (?, ?, ?, 'timeout')")
+        .bind(bad).bind(ds + 3600).bind(ds + 3600 + 10 * 86400).execute(&env.state.db).await.unwrap();
+    let s = compute(&env.state, "2026-03").await.unwrap();
+    assert_eq!(s.monitors[0].name, "bad", "worst uptime first");
+    assert_eq!(s.monitors[1].name, "good");
+}
 ```
 
 - [ ] **Step 3: Run to verify they fail**
@@ -497,20 +558,23 @@ pub async fn compute(state: &AppState, period: &str) -> anyhow::Result<ReportSum
 
     for m in &monitors {
         let has_data = !m.is_paused && had_any(state, m.id, period, ds, de).await?;
-        // per-monitor incident stats (clipped both ends)
+        // incident overlap spans, fetched ONCE (clipped both ends where used).
         let raw: Vec<(i64, Option<i64>)> = sqlx::query_as(
             "SELECT started_at, resolved_at FROM incidents WHERE monitor_id = ? AND started_at < ? AND (resolved_at IS NULL OR resolved_at > ?)",
         ).bind(m.id).bind(de).bind(ds).fetch_all(&state.db).await?;
         let inc_count = raw.len() as i64;
-        // resolved-in-window durations for MTTR
         let mttr = mean_resolved_in_window(&raw, ds, de);
+        // Compute uptime ONCE per monitor (single source; no double compute).
         let (uptime_pct, downtime, end_status) = if has_data {
-            let (down, denom) = monitor_uptime(state, m, ds, de, &windows).await?;
-            let up = uptime::compute(&to_spans(&raw), ds, de, true, &resolve::maintenance_intervals(&windows, m.id, &resolve::parse_tags(m.tags.as_deref().unwrap_or("")), ds, de)).uptime_pct;
-            total_down += down; total_denom += denom; reporting += 1;
-            if up.is_some() && down == 0 { clean += 1; }
-            (up, down, end_status_at(&raw, de))
-            let _ = denom;
+            let tags = resolve::parse_tags(m.tags.as_deref().unwrap_or(""));
+            let maint = resolve::maintenance_intervals(&windows, m.id, &tags, ds, de);
+            let u = uptime::compute(&to_spans(&raw), ds, de, true, &maint);
+            let eff_denom: i64 = resolve::subtract_intervals((ds, de), &maint).iter().map(|(s, e)| e - s).sum();
+            total_down += u.downtime_seconds;
+            total_denom += eff_denom;
+            reporting += 1;
+            if u.uptime_pct.is_some() && u.downtime_seconds == 0 { clean += 1; }
+            (u.uptime_pct, u.downtime_seconds, end_status_at(&raw, de))
         } else if m.is_paused {
             (None, 0, "paused".to_string())
         } else {
@@ -524,6 +588,12 @@ pub async fn compute(state: &AppState, period: &str) -> anyhow::Result<ReportSum
             end_status,
         });
     }
+    // Worst-uptime-first (CLAUDE.md §13.1); None/paused/no-data sort last.
+    monitor_rows.sort_by(|a, b| {
+        a.uptime_pct.unwrap_or(f64::INFINITY)
+            .partial_cmp(&b.uptime_pct.unwrap_or(f64::INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let fleet_uptime = if total_denom > 0 { Some(round2((1.0 - total_down as f64 / total_denom as f64) * 100.0)) } else { None };
     let prior = fleet_uptime_for(state, &prior_month(period)).await?;
@@ -533,7 +603,7 @@ pub async fn compute(state: &AppState, period: &str) -> anyhow::Result<ReportSum
     let inc_rows: Vec<(String, i64, Option<i64>, Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT m.name, i.started_at, i.resolved_at, i.cause, i.status_code, i.error_message \
          FROM incidents i JOIN monitors m ON m.id = i.monitor_id \
-         WHERE i.started_at < ? AND (i.resolved_at IS NULL OR i.resolved_at > ?) ORDER BY i.started_at",
+         WHERE i.started_at < ? AND (i.resolved_at IS NULL OR i.resolved_at > ?) ORDER BY m.name, i.started_at",
     ).bind(de).bind(ds).fetch_all(&state.db).await?;
     let mut incidents = Vec::new();
     let mut longest: Option<LongestOutage> = None;
@@ -636,7 +706,7 @@ fn tally(e30: &mut i64, e60: &mut i64, days: Option<i64>) {
 }
 ```
 
-> **Implementer note:** the `let _ = denom;` line inside the `if has_data` arm above is a transcription artifact — remove it; `denom` is consumed by `total_denom += denom`. Keep the arm returning the 3-tuple `(up, down, end_status_at(&raw, de))`. Ensure `crate::models::MaintenanceWindow` is imported for the `monitor_uptime` signature.
+> **Implementer note:** `monitor_uptime` (used only by `fleet_uptime_for`) takes `windows: &[crate::models::MaintenanceWindow]` fully-qualified — do NOT add a `use crate::models::MaintenanceWindow;` (it would be unused → warning). `to_spans` is shared by both `compute` and `monitor_uptime`.
 
 Add to `report/mod.rs`:
 ```rust
@@ -733,7 +803,7 @@ pub fn render_html(s: &ReportSummary) -> String {
     let mut h = String::new();
     h.push_str(&format!("<!doctype html><html><head><meta charset=\"utf-8\"><title>Vigil report — {}</title><style>{STYLE}</style></head><body>", esc(&s.label)));
     h.push_str(&format!("<h1>Vigil monthly report — {}</h1>", esc(&s.label)));
-    h.push_str(&format!("<p class=\"mono\">{} · generated {}</p>", esc(&s.period), fmt_ts(s.generated_at)));
+    h.push_str(&format!("<p class=\"mono\">{} · generated {} · Vigil {}</p>", esc(&s.period), fmt_ts(s.generated_at), env!("CARGO_PKG_VERSION")));
     // hero band
     h.push_str("<div class=\"band\">");
     for (label, val) in [
@@ -953,8 +1023,10 @@ async fn generate_then_list_then_get_then_html_then_delete() {
     let id = g["id"].as_i64().unwrap();
 
     let listed = list(State(env.state.clone())).await.unwrap().0;
-    assert!(listed.as_array().unwrap().iter().any(|r| r["label"] == "March 2026"));
-    assert!(listed[0]["headline"]["uptime_pct"].is_null() || listed[0]["headline"]["uptime_pct"].is_number());
+    assert_eq!(listed[0]["label"], "March 2026");
+    // empty DB (no monitors) → fleet uptime None, 0 incidents
+    assert!(listed[0]["headline"]["uptime_pct"].is_null());
+    assert_eq!(listed[0]["headline"]["incidents"], 0);
 
     let one = get_one(State(env.state.clone()), Path(id)).await.unwrap().0;
     assert_eq!(one["summary"]["period"], "2026-03");
@@ -1100,15 +1172,22 @@ async fn tick_backfills_missing_months_in_order() {
     let env = test_state().await;
     vigil::settings_store::set(&env.state.db, "report_auto_generate", "1").await.unwrap();
     vigil::settings_store::set(&env.state.db, "report_day_of_month", "1").await.unwrap();
-    vigil::settings_store::set(&env.state.db, "report_time", "00:00").await.unwrap();
-    // marker two months behind the just-ended month → both must generate
-    // (drive tick_once against real now(); assert >=1 reports created and marker advanced)
-    vigil::settings_store::set(&env.state.db, "report.last_generated_period", "2000-01").await.unwrap();
+    vigil::settings_store::set(&env.state.db, "report_time", "00:00").await.unwrap(); // day>=1 & 00:00 → always due
+    // Marker EXACTLY two months behind the just-ended month → both missing months must
+    // generate, in ascending order, and the marker must advance to the just-ended month.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let target = vigil::report::prior_month(&vigil::report::month_of(now)); // just-ended month
+    let first_missing = vigil::report::prior_month(&target);
+    let two_behind = vigil::report::prior_month(&first_missing);
+    vigil::settings_store::set(&env.state.db, "report.last_generated_period", &two_behind).await.unwrap();
+
     tick_once(&env.state).await.unwrap();
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM reports").fetch_one(&env.state.db).await.unwrap();
-    assert!(n >= 1, "backfill generated at least the prior month");
-    let marker = vigil::settings_store::get(&env.state.db, "report.last_generated_period", "").await;
-    assert!(!marker.is_empty() && marker != "2000-01", "marker advanced");
+
+    let (ps_first, _) = vigil::report::month_bounds(&first_missing);
+    let (ps_target, _) = vigil::report::month_bounds(&target);
+    let rows: Vec<i64> = sqlx::query_scalar("SELECT period_start FROM reports ORDER BY period_start").fetch_all(&env.state.db).await.unwrap();
+    assert_eq!(rows, vec![ps_first, ps_target], "exactly the two missing months, ascending");
+    assert_eq!(vigil::settings_store::get(&env.state.db, "report.last_generated_period", "").await, target, "marker advanced to just-ended month");
 }
 
 #[tokio::test]
@@ -1165,16 +1244,16 @@ fn days_in_month(epoch: i64) -> u32 {
     let d = chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0).unwrap_or_default().date_naive();
     let (y, m) = (d.format("%Y").to_string().parse::<i32>().unwrap_or(1970), d.format("%m").to_string().parse::<u32>().unwrap_or(1));
     let first_next = if m == 12 { chrono::NaiveDate::from_ymd_opt(y + 1, 1, 1) } else { chrono::NaiveDate::from_ymd_opt(y, m + 1, 1) };
-    first_next.and_then(|nx| nx.pred_opt()).map(|last| last.day0() + 1).unwrap_or(28)
+    first_next.and_then(|nx| nx.pred_opt()).map(|last| chrono::Datelike::day0(&last) + 1).unwrap_or(28)
 }
-use chrono::Datelike;
 
 pub fn should_run_today(now_ts: i64, day_of_month: i64, time_offset: i64) -> bool {
+    // chrono::Datelike methods called fully-qualified (no `use chrono` per Global Constraints).
     let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(now_ts, 0).unwrap_or_default();
     let today = dt.date_naive();
     let eff_day = day_of_month.clamp(1, days_in_month(now_ts) as i64) as u32;
     let start_of_today = today.and_hms_opt(0, 0, 0).map(|d| d.and_utc().timestamp()).unwrap_or(0);
-    today.day() >= eff_day && now_ts >= start_of_today + time_offset
+    chrono::Datelike::day(&today) >= eff_day && now_ts >= start_of_today + time_offset
 }
 
 fn parse_hm(s: &str) -> i64 {
@@ -1242,8 +1321,10 @@ git commit -am "feat(p4.4): monthly report scheduler (UTC, backfill loop, email-
 
 ### Task 7: `report_*` settings (API + TS surface)
 
-**Files:** Modify `crates/vigil/src/api/settings.rs`, `web/src/api.ts`; Test extend `crates/vigil/tests/settings_p44.rs`.
-(The `settings_store` helpers were added in Task 6.)
+**Files:** Modify `crates/vigil/src/api/settings.rs`, `crates/vigil/src/settings_store.rs` (the `report_recipients` helper), `crates/vigil/tests/settings_p43.rs` (DTO literal fix — see below), `web/src/api.ts`; Test create `crates/vigil/tests/settings_p44.rs`.
+(The `report_auto_generate`/`report_day_of_month`/`report_time`/`report_tick_seconds` helpers were added in Task 6.)
+
+> **MUST also update `crates/vigil/tests/settings_p43.rs:48-57`** (Task 7 Step 3): it constructs `UpdateSettingsDto { … }` with today's exact 8 fields and no `..Default::default()` (the struct derives only `Deserialize`). Adding 4 fields to the DTO makes that literal fail with `E0063` and breaks the whole suite. Add `report_auto_generate: None, report_day_of_month: None, report_time: None, report_recipients: None,` to that literal. It's tracked → `git commit -am` captures it.
 
 - [ ] **Step 1: Write failing test** — `crates/vigil/tests/settings_p44.rs`
 
@@ -1497,6 +1578,6 @@ git commit -am "feat(p4.4): Reports screen (month cards + iframe view) + rail na
 
 **Spec coverage:** §3 migration → Task 1 (+ db.rs wiring, the M2 must-fix); §4 compute (durable had_any M1, single-pass fleet, both-ends clip, up_count avg, whole-month p95, distinct alerts, delta-live, cert_outlook) → Task 2; §6 HTML → Task 3; §5 generate + §9 auto-email → Task 4; §7.1 API → Task 5; §8 scheduler (backfill S1 + retry S2 + clamp) → Task 6; §10 settings → Tasks 6/7; §7.2 frontend → Task 8; §11 (no event) honored; §13 tests distributed; §15 boundaries respected (UTC, HTML-only, p95/delta/outlook caveats). All covered.
 
-**Placeholder scan:** one flagged transcription artifact in Task 2 Step 4 (`let _ = denom;`) is called out inline with the fix; all other steps contain complete code.
+**Placeholder scan:** no placeholders; the earlier `let _ = denom;` artifact and the double-compute were removed from the Task 2 code block (single-pass `uptime::compute`); all steps contain complete code.
 
 **Type consistency:** `ReportSummary`/`FleetReport`/`MonitorReport`/`ReportIncident`/`ExpiryItem`/`LongestOutage` field names are identical across compute (Task 2), html (Task 3), generate (Task 4), and api (Task 5). `report::{generate, send_report_email, month_of, prior_month, next_month, month_bounds, month_label}` and `scheduler::{should_run_today, tick_once, run, seed_marker_if_absent}` names match across tasks. `SendOutcome` reused from `digest`. Settings keys (`report_auto_generate`/`report_day_of_month`/`report_time`/`report_recipients`/`report_tick_seconds`/`report.last_generated_period`) identical across Tasks 6/7.
