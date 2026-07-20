@@ -82,4 +82,5 @@ pub fn routes() -> Router<AppState> {
         .route("/reports/:id/html", get(reports::html))
         .route("/reports/:id/email", post(reports::email))
         .route("/backup/export", get(backup::export))
+        .route("/backup/info", get(backup::info))
 }

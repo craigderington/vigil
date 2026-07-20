@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::extract::State;
+use axum::Json;
+use serde::Serialize;
 
 use super::{db_err, now};
 use crate::app::AppState;
@@ -59,4 +61,44 @@ pub async fn export(State(state): State<AppState>) -> Result<(HeaderMap, Vec<u8>
             .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"vigil-backup.db\"")),
     );
     Ok((headers, bytes))
+}
+
+#[derive(Serialize)]
+pub struct BackupInfo {
+    pub schema_version: i64,
+    pub db_size_bytes: i64, // live vigil.db file only (excludes WAL sidecars) — approximate
+    pub generated_at: i64,
+    pub counts: BackupCounts,
+}
+
+#[derive(Serialize)]
+pub struct BackupCounts {
+    pub monitors: i64,
+    pub incidents: i64,
+    pub checks: i64,
+    pub reports: i64,
+    pub channels: i64,
+}
+
+async fn count(pool: &sqlx::SqlitePool, table: &str) -> i64 {
+    // table names are hardcoded literals below (never user input)
+    sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+        .fetch_one(pool).await.unwrap_or(0)
+}
+
+pub async fn info(State(state): State<AppState>) -> Result<Json<BackupInfo>, (StatusCode, String)> {
+    let db_size_bytes = tokio::fs::metadata(&*state.db_path).await.map(|m| m.len() as i64).unwrap_or(0);
+    let counts = BackupCounts {
+        monitors: count(&state.db, "monitors").await,
+        incidents: count(&state.db, "incidents").await,
+        checks: count(&state.db, "checks").await,
+        reports: count(&state.db, "reports").await,
+        channels: count(&state.db, "notification_channels").await,
+    };
+    Ok(Json(BackupInfo {
+        schema_version: crate::db::current_schema_version(),
+        db_size_bytes,
+        generated_at: now(),
+        counts,
+    }))
 }
