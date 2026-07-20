@@ -135,9 +135,10 @@ pub async fn import(State(state): State<AppState>, body: Bytes) -> Result<Json<I
     let dir = data_dir(&state);
     let ts = now();
     let import_path = dir.join(format!(".vigil-import-{ts}-{}.db", rand::random::<u32>()));
-    tokio::fs::write(&import_path, &body).await.map_err(|e| ise(format!("write upload: {e}")))?;
 
     // helper to remove the temp import file + its WAL sidecars on every exit
+    // (hoisted above the write itself so a failed/partial write is also
+    // cleaned up, not just the post-write validation/replace failures)
     let cleanup = |p: &Path| {
         let p = p.to_path_buf();
         async move {
@@ -146,6 +147,10 @@ pub async fn import(State(state): State<AppState>, body: Bytes) -> Result<Json<I
             let _ = tokio::fs::remove_file(p.with_extension("db-shm")).await;
         }
     };
+    if let Err(e) = tokio::fs::write(&import_path, &body).await {
+        cleanup(&import_path).await;
+        return Err(ise(format!("write upload: {e}")));
+    }
 
     // 2. validate read-only (do NOT auto-create / auto-migrate here)
     let current = crate::db::current_schema_version();
@@ -174,7 +179,11 @@ pub async fn import(State(state): State<AppState>, body: Bytes) -> Result<Json<I
     // 3. upgrade an older backup in place, then release its handles before ATTACH
     let migrated = backup_version < current;
     if migrated {
-        match crate::db::connect(import_path.to_str().unwrap()).await {
+        let import_str = match import_path.to_str() {
+            Some(s) => s,
+            None => { cleanup(&import_path).await; return Err(ise("non-UTF-8 import path".into())); }
+        };
+        match crate::db::connect(import_str).await {
             Ok(p) => p.close().await,
             Err(e) => { cleanup(&import_path).await; return Err(ise(format!("migrate backup: {e}"))); }
         }

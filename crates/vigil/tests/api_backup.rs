@@ -174,3 +174,49 @@ async fn import_upgrades_older_backup() {
     let list: serde_json::Value = c.get(format!("http://{a}/api/monitors")).send().await.unwrap().json().await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1, "monitor from the older backup is present after migrate+replace");
 }
+
+// A backup that is structurally valid (passes the version gate, ATTACHes,
+// and every per-table INSERT succeeds under deferred FKs) but contains a
+// referentially-broken row must fail at COMMIT, be rolled back, and leave
+// the live DB completely untouched. This is the corruption-critical path:
+// mid-transaction failure AFTER BEGIN, not a pre-BEGIN rejection.
+#[tokio::test]
+async fn import_rollback_on_commit_failure_leaves_data_intact() {
+    let env = test_state().await;
+    let a = serve(env.state.clone()).await;
+    let c = reqwest::Client::new();
+
+    // seed live data that must survive the failed import
+    c.post(format!("http://{a}/api/monitors"))
+        .json(&serde_json::json!({"name":"stay","url":"https://example.com"}))
+        .send().await.unwrap();
+
+    // Craft a valid v6 backup containing an ORPHAN checks row (monitor_id
+    // 999 does not exist). Disable FK enforcement on the crafting connection
+    // so the orphan can be inserted in the first place; the crafted file
+    // itself is otherwise a normal, fully-migrated v6 DB.
+    let dir = tempfile::tempdir().unwrap();
+    let craft = dir.path().join("bad.db");
+    let pool = vigil::db::connect(craft.to_str().unwrap()).await.unwrap();
+    {
+        let mut conn = pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA foreign_keys=OFF").execute(&mut *conn).await.unwrap();
+        sqlx::query("INSERT INTO checks (monitor_id, checked_at, status) VALUES (999, 0, 'up')")
+            .execute(&mut *conn).await.unwrap();
+    }
+    let clean = dir.path().join("bad-clean.db");
+    sqlx::query(&format!("VACUUM INTO '{}'", clean.display())).execute(&pool).await.unwrap();
+    drop(pool);
+    let bytes = std::fs::read(&clean).unwrap();
+
+    // Under PRAGMA defer_foreign_keys=ON, the per-table INSERTs during the
+    // replace succeed (FK checking is deferred), but the orphan surfaces as
+    // a foreign key violation at COMMIT -> the handler ROLLBACKs -> 500.
+    let resp = c.post(format!("http://{a}/api/backup/import")).body(bytes).send().await.unwrap();
+    assert_eq!(resp.status(), 500, "COMMIT-time FK violation must surface as a 500, not succeed");
+
+    // live data must be exactly as it was before the attempted import
+    let list: serde_json::Value = c.get(format!("http://{a}/api/monitors")).send().await.unwrap().json().await.unwrap();
+    let names: Vec<&str> = list.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["stay"], "rollback must leave live data untouched: {names:?}");
+}
