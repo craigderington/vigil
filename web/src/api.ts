@@ -96,6 +96,10 @@ export interface Settings {
   digest_enabled: boolean;
   digest_time: string;
   digest_recipients: number[];
+  report_auto_generate: boolean;
+  report_day_of_month: number;
+  report_time: string;
+  report_recipients: number[];
 }
 
 export function getSettings(): Promise<Settings> {

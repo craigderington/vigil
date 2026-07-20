@@ -31,6 +31,10 @@ async fn current_settings(state: &AppState) -> Value {
         "digest_enabled": settings_store::digest_enabled(&state.db).await,
         "digest_time": settings_store::digest_time(&state.db).await,
         "digest_recipients": settings_store::digest_recipients(&state.db).await,
+        "report_auto_generate": settings_store::report_auto_generate(&state.db).await,
+        "report_day_of_month": settings_store::report_day_of_month(&state.db).await,
+        "report_time": settings_store::report_time(&state.db).await,
+        "report_recipients": settings_store::report_recipients(&state.db).await,
     })
 }
 
@@ -45,6 +49,10 @@ pub struct UpdateSettingsDto {
     pub digest_enabled: Option<bool>,
     pub digest_time: Option<String>,
     pub digest_recipients: Option<Value>,
+    pub report_auto_generate: Option<bool>,
+    pub report_day_of_month: Option<i64>,
+    pub report_time: Option<String>,
+    pub report_recipients: Option<Value>,
 }
 
 pub async fn update_settings(
@@ -101,6 +109,34 @@ pub async fn update_settings(
         settings_store::set(&state.db, "notify.digest_recipients", &encoded)
             .await
             .map_err(set_err)?;
+    }
+    if let Some(b) = dto.report_auto_generate {
+        settings_store::set(&state.db, "report_auto_generate", if b { "1" } else { "0" })
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(d) = dto.report_day_of_month {
+        settings_store::set(&state.db, "report_day_of_month", &d.to_string())
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(t) = dto.report_time {
+        settings_store::set(&state.db, "report_time", &t)
+            .await
+            .map_err(set_err)?;
+    }
+    if let Some(r) = dto.report_recipients {
+        let ids: Vec<i64> = match &r {
+            Value::Array(a) => a.iter().filter_map(|v| v.as_i64()).collect(),
+            _ => Vec::new(),
+        };
+        settings_store::set(
+            &state.db,
+            "report_recipients",
+            &serde_json::to_string(&ids).unwrap_or_else(|_| "[]".into()),
+        )
+        .await
+        .map_err(set_err)?;
     }
 
     Ok(Json(current_settings(&state).await))

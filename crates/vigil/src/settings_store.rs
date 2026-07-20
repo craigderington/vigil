@@ -200,3 +200,8 @@ pub async fn report_tick_seconds(pool: &SqlitePool) -> i64 {
         .parse()
         .unwrap_or(DEFAULT_REPORT_TICK_SECONDS)
 }
+
+/// `report_recipients` — email channel ids, stored as a JSON array string.
+pub async fn report_recipients(pool: &SqlitePool) -> Vec<i64> {
+    serde_json::from_str(&get(pool, "report_recipients", "[]").await).unwrap_or_default()
+}

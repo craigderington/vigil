@@ -54,6 +54,10 @@ async fn settings_put_then_get_roundtrips_digest_recipients_as_array() {
         digest_enabled: Some(true),
         digest_time: Some("07:15".into()),
         digest_recipients: Some(json!([2, 4])),
+        report_auto_generate: None,
+        report_day_of_month: None,
+        report_time: None,
+        report_recipients: None,
     };
     let _ = update_settings(State(state.clone()), Json(dto)).await.unwrap();
 
