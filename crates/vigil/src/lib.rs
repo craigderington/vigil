@@ -14,6 +14,7 @@ pub mod maintenance_windows;
 pub mod models;
 pub mod notify;
 pub mod probe;
+pub mod renotify;
 pub mod rollup;
 pub mod scheduler;
 pub mod secrets;
