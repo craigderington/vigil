@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use vigil::{anchor::AnchorGate, app, cert_scheduler, config::Config, db, digest, engine, heartbeat, maintenance, maintenance_windows, notify, renotify, scheduler, secrets, settings_store};
+use vigil::{anchor::AnchorGate, app, cert_scheduler, config::Config, db, digest, engine, heartbeat, maintenance, maintenance_windows, notify, renotify, report, scheduler, secrets, settings_store};
 
 #[tokio::main]
 async fn main() {
@@ -88,6 +88,7 @@ async fn serve() {
     tokio::spawn(maintenance_windows::run(state.clone()));
     tokio::spawn(renotify::run(state.clone()));
     tokio::spawn(digest::run(state.clone()));
+    tokio::spawn(report::scheduler::run(state.clone()));
     // One-shot rollup catch-up at startup, so a period of downtime doesn't
     // leave gaps in the 90-day uptime bars until the next nightly pass.
     // Spawned rather than awaited so it never delays serving traffic.

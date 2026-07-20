@@ -17,6 +17,9 @@ const DEFAULT_RENOTIFY_HOURS: i64 = 6;
 const DEFAULT_RENOTIFY_TICK_SECONDS: i64 = 300;
 const DEFAULT_DIGEST_TIME: &str = "08:00";
 const DEFAULT_DIGEST_TICK_SECONDS: i64 = 60;
+const DEFAULT_REPORT_DAY_OF_MONTH: i64 = 1;
+const DEFAULT_REPORT_TIME: &str = "08:00";
+const DEFAULT_REPORT_TICK_SECONDS: i64 = 300;
 
 /// Reads `key`, returning `default` if the row is absent.
 pub async fn get(pool: &SqlitePool, key: &str, default: &str) -> String {
@@ -168,4 +171,32 @@ pub async fn digest_tick_seconds(pool: &SqlitePool) -> i64 {
 /// `notify.digest_recipients` — email channel ids, stored as a JSON array string.
 pub async fn digest_recipients(pool: &SqlitePool) -> Vec<i64> {
     serde_json::from_str(&get(pool, "notify.digest_recipients", "[]").await).unwrap_or_default()
+}
+
+/// `report_auto_generate` — monthly report auto-generate master switch.
+/// Stored "1"/"0"; any value other than "1" is false. Default on.
+pub async fn report_auto_generate(pool: &SqlitePool) -> bool {
+    get(pool, "report_auto_generate", "1").await == "1"
+}
+
+/// `report_day_of_month` — the day of the UTC month the report scheduler
+/// fires on (clamped to the month's actual length by the scheduler).
+pub async fn report_day_of_month(pool: &SqlitePool) -> i64 {
+    get(pool, "report_day_of_month", &DEFAULT_REPORT_DAY_OF_MONTH.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_REPORT_DAY_OF_MONTH)
+}
+
+/// `report_time` — "HH:MM" UTC offset into the day the report fires.
+pub async fn report_time(pool: &SqlitePool) -> String {
+    get(pool, "report_time", DEFAULT_REPORT_TIME).await
+}
+
+/// `report_tick_seconds` — report scheduler granularity.
+pub async fn report_tick_seconds(pool: &SqlitePool) -> i64 {
+    get(pool, "report_tick_seconds", &DEFAULT_REPORT_TICK_SECONDS.to_string())
+        .await
+        .parse()
+        .unwrap_or(DEFAULT_REPORT_TICK_SECONDS)
 }
