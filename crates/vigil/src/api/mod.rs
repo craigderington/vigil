@@ -2,6 +2,7 @@
 //! `/healthz`, and the SPA static fallback are wired directly in
 //! `app::router` rather than here (they aren't `/api/*` routes).
 
+pub mod backup;
 pub mod channels;
 pub mod incidents;
 pub mod maintenance;
@@ -80,4 +81,5 @@ pub fn routes() -> Router<AppState> {
         .route("/reports/:id", get(reports::get_one).delete(reports::delete))
         .route("/reports/:id/html", get(reports::html))
         .route("/reports/:id/email", post(reports::email))
+        .route("/backup/export", get(backup::export))
 }
