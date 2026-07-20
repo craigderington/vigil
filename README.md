@@ -48,11 +48,20 @@ always 8090 — only the host-side mapping changes.
 - **`docker compose down -v` deletes that volume.** This is the one command
   that wipes your monitors, check history, and incidents — don't run it
   unless you mean to start over.
-- **Backup** (copies the live DB file out to `./vigil-backup.db`): the
-  database runs in SQLite WAL mode, so a hot copy of just `vigil.db` can miss
-  data still sitting in `vigil.db-wal` and yield a torn or stale backup.
-  Stop the container first so it cleanly checkpoints the WAL into the main
-  file on shutdown, copy, then start it back up:
+- **In-app backup (recommended):** Settings → *Backup & restore* → **Download
+  backup** exports a consistent, WAL-safe snapshot of the whole database (via
+  SQLite `VACUUM INTO`) as a single `.db` file — no need to stop the container.
+  It includes channel secrets (webhook/ntfy tokens, `inline:` auth) but **not**
+  the SMTP password (that lives in a Docker secret). To restore, pick the file
+  under *Import & replace*: Vigil validates it (rejecting non-Vigil or
+  newer-schema files), writes a `pre-import-<epoch>.db` safety snapshot to
+  `/data`, then atomically replaces all data in one transaction and reloads.
+  Anchor-host changes from a restored backup take effect after the next restart.
+- **Manual cold-copy backup** (alternative): the database runs in SQLite WAL
+  mode, so a hot copy of just `vigil.db` can miss data still sitting in
+  `vigil.db-wal` and yield a torn or stale backup. Stop the container first so
+  it cleanly checkpoints the WAL into the main file on shutdown, copy, then
+  start it back up:
 
   ```bash
   docker compose stop vigil
