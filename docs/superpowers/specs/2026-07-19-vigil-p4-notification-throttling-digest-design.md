@@ -360,7 +360,7 @@ possibly some `expirations` — **still sent** (dead-man's switch).
   `monitor_notifications` — none of which a fleet-wide digest wants). But the email plumbing
   (`EmailChannelConfig` parse → `SmtpConfig`/`EmailMsg` build → `transport.send`, incl. the
   `auth_user` username-fallback at `notify/mod.rs:47`) is private in `dispatch.rs`. Extract a
-  `pub(crate)` helper — `send_email_via_channel(transport, channel_config_json, subject,
+  `pub` helper — `send_email_via_channel(transport, channel_config_json, subject,
   body_text, body_html) -> Result<()>` — and call it from **both** `deliver()`'s email arm
   and `digest::send`, so the two never diverge.
 - For each id in `notify.digest_recipients` that resolves to an **active email channel**,
@@ -519,7 +519,7 @@ Roughly (writing-plans will finalize):
 1. Settings store helpers + `DEFAULT_*` consts (renotify + digest keys, incl. the
    `digest_enabled -> bool` and `digest_recipients -> Vec<i64>` helpers) + tests.
 2. Settings API DTO/GET/PUT extension (parsed-array GET for recipients) + tests.
-3. Extract `pub(crate) send_email_via_channel(...)` from `dispatch.rs`; route `deliver()`'s
+3. Extract `pub send_email_via_channel(...)` from `dispatch.rs` (`pub`, not `pub(crate)`: the Task 3 test imports it across the crate boundary); route `deliver()`'s
    email arm through it (behavior-preserving refactor) + tests.
 4. `renotify.rs` — `renotify_once` (incident-scoped baseline, `status='down'` filter,
    deleted-monitor skip, TOCTOU re-check, post-render `Reminder:` decoration) + tests; wire

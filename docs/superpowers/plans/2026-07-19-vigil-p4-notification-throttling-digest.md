@@ -27,18 +27,18 @@
 |---|---|---|
 | `crates/vigil/src/settings_store.rs` | modify | Add `renotify_hours`, `renotify_tick_seconds`, `digest_enabled`, `digest_time`, `digest_tick_seconds`, `digest_recipients` helpers + `DEFAULT_*` consts. |
 | `crates/vigil/src/api/settings.rs` | modify | Surface the new keys on GET/PUT (recipients as a parsed array). |
-| `crates/vigil/src/notify/dispatch.rs` | modify | Extract `pub(crate) send_email_via_channel(...)`; route `send_to_channel`'s email arm through it. |
+| `crates/vigil/src/notify/dispatch.rs` | modify | Extract `pub send_email_via_channel(...)` (MUST be `pub`, not `pub(crate)` — the Task 3 integration test imports it across the crate boundary); route `send_to_channel`'s email arm through it. |
 | `crates/vigil/src/renotify.rs` | create | `renotify_once` (scan/decide/fire) + reminder decoration + `run` loop. |
 | `crates/vigil/src/digest.rs` | create | `DigestSummary` + `build` (compute) + `send`/audit + `should_send`/`parse_digest_time` + `run` scheduler. |
 | `crates/vigil/src/lib.rs` | modify | `pub mod renotify;` + `pub mod digest;`. |
 | `crates/vigil/src/main.rs` | modify | Spawn `renotify::run` + `digest::run`. |
 | `web/src/api.ts` | modify | Extend `Settings` interface with the new fields. |
 | `web/src/components/Settings.tsx` | modify | Re-notify + digest controls. |
-| `web/src/components/DetailPanel.tsx` (or Incidents) | modify | Acknowledge "(silences reminders)" hint. |
+| `web/src/components/Incidents.tsx` + `web/src/components/IncidentTimeline.tsx` | modify | Acknowledge "(silences reminders)" hint on BOTH Acknowledge buttons. |
 | `crates/vigil/tests/settings_p43.rs` | create | settings_store helper tests. |
 | `crates/vigil/tests/renotify.rs` | create | re-notify integration tests. |
 | `crates/vigil/tests/digest.rs` | create | digest compute + send + scheduler tests. |
-| `crates/vigil/tests/common/mod.rs` | modify | Add `test_state_prober(online)` + a `FailingTransport` for the offline/all-failed tests. |
+| `crates/vigil/tests/common/mod.rs` | modify | Add a `FailingTransport` for the all-failed digest test (Task 6). The offline case reuses the EXISTING `test_state_offline()`. |
 | `web/src/__tests__/settings.test.tsx` | modify | Frontend settings PUT assertions. |
 
 **Verified interfaces from the current tree (use these EXACTLY):**
@@ -199,12 +199,6 @@ use axum::Json;
 use serde_json::json;
 use vigil::api::settings::{get_settings, update_settings, UpdateSettingsDto};
 
-// Build a minimal AppState around a fresh pool (transport unused by settings).
-async fn settings_state() -> (vigil::app::AppState, tempfile::TempDir) {
-    let env = common::test_state().await;
-    (env.state, env._dir_take())
-}
-
 #[tokio::test]
 async fn settings_put_then_get_roundtrips_digest_recipients_as_array() {
     let env = common::test_state().await;
@@ -230,7 +224,7 @@ async fn settings_put_then_get_roundtrips_digest_recipients_as_array() {
 }
 ```
 
-Note: `test_state()` already builds an `AppState`; ignore the unused `settings_state`/`_dir_take` helper above if `test_state` suffices — call `common::test_state().await` and use `env.state`. (Drop the `settings_state` helper; it was illustrative.)
+Note: the test uses only `common::test_state().await` + `env.state` (both public) — no extra helper, no `AppState`/`TempDir` import needed.
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -284,7 +278,7 @@ Add to `update_settings` (before the final `Ok(Json(...))`):
     }
 ```
 
-If `TestEnv` fields are private, add `pub` to `state` (already `pub`) — no `_dir_take` needed; delete that illustrative helper from the test.
+`TestEnv.state` is already `pub`, so the test reaches it directly.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -306,7 +300,7 @@ git commit -am "feat(p4.3): expose renotify + digest settings on /api/settings"
 - Test: `crates/vigil/tests/notify_email_helper.rs` (create) + existing `tests/notify.rs`/`tests/notify_multi.rs` must still pass.
 
 **Interfaces:**
-- Produces: `pub(crate) async fn send_email_via_channel(transport: &dyn crate::notify::Transport, config_json: &str, subject: &str, body_text: &str, body_html: Option<String>) -> anyhow::Result<()>` — used by both `deliver()`'s email arm and (Task 6) `digest::send`.
+- Produces: `pub async fn send_email_via_channel(transport: &dyn crate::notify::Transport, config_json: &str, subject: &str, body_text: &str, body_html: Option<String>) -> anyhow::Result<()>` — used by both `deliver()`'s email arm and (Task 6) `digest::send`. **`pub` (not `pub(crate)`):** integration tests under `crates/vigil/tests/` are separate crates and can only see `pub` items; the Task 3 test imports this directly, so `pub(crate)` would fail with E0603 (matches how `deliver` is already `pub`).
 
 - [ ] **Step 1: Write the failing test** — `crates/vigil/tests/notify_email_helper.rs`
 
@@ -349,7 +343,7 @@ Add the helper (near `send_to_channel`):
 /// config + message, and hand off to the transport. Used by both `deliver`'s
 /// email arm and the daily digest (which bypasses `deliver`), so the two
 /// never diverge (incl. the `username`/`from` handling).
-pub(crate) async fn send_email_via_channel(
+pub async fn send_email_via_channel(
     transport: &dyn crate::notify::Transport,
     config_json: &str,
     subject: &str,
@@ -405,48 +399,22 @@ git commit -am "refactor(p4.3): extract shared send_email_via_channel from dispa
 
 **Files:**
 - Create: `crates/vigil/src/renotify.rs`
-- Modify: `crates/vigil/src/lib.rs` (add `pub mod renotify;`), `crates/vigil/src/main.rs` (spawn), `crates/vigil/tests/common/mod.rs` (add `test_state_prober`)
+- Modify: `crates/vigil/src/lib.rs` (add `pub mod renotify;`), `crates/vigil/src/main.rs` (spawn). (No `common/mod.rs` change — reuse existing `test_state_offline()`.)
 - Test: `crates/vigil/tests/renotify.rs` (create)
 
 **Interfaces:**
 - Consumes: `dispatch::deliver`, `templates::render`, `settings_store::renotify_hours`/`renotify_tick_seconds`, `state.anchor.current()`.
 - Produces: `renotify::renotify_once(state: &AppState) -> anyhow::Result<()>`, `renotify::run(state: AppState)`.
 
-- [ ] **Step 1: Add the test harness helper** — `crates/vigil/tests/common/mod.rs`
+- [ ] **Step 1: No harness change needed — reuse the existing offline builder**
 
-The offline test needs an `AnchorGate` whose prober returns `false`. Refactor `test_state` to delegate to a prober-parameterized builder, and expose it:
-```rust
-pub async fn test_state() -> TestEnv {
-    test_state_prober(true).await
-}
-
-pub async fn test_state_prober(online: bool) -> TestEnv {
-    let (pool, dir) = fresh_pool().await;
-    let sent = Arc::new(Mutex::new(Vec::new()));
-    let sent_http = Arc::new(Mutex::new(Vec::new()));
-    let (bus, _busrx) = tokio::sync::broadcast::channel(64);
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let anchor = Arc::new(vigil::anchor::AnchorGate::with_prober(
-        bus.clone(),
-        Box::new(move || online),
-    ));
-    let state = AppState {
-        db: pool,
-        bus,
-        transport: Arc::new(RecordingTransport { sent: sent.clone() }),
-        http_sender: Arc::new(RecordingHttpSender { sent_http: sent_http.clone() }),
-        sched_tx: tx,
-        anchor,
-    };
-    TestEnv { state, sent, sent_http, _rx: rx, _dir: dir }
-}
-```
+`crates/vigil/tests/common/mod.rs` **already** has `pub async fn test_state_offline() -> TestEnv` (line 43) — it builds an `AppState` with `AnchorGate::with_prober(.., || false)` and calls `anchor.probe_and_update().await` so `state.anchor.current()` reads `Offline`. The offline re-notify test (Step 2) uses it directly; do NOT add a new `test_state_prober` (that would duplicate it). `FailingTransport` for Task 6 does not exist yet and is added in Task 6.
 
 - [ ] **Step 2: Write the failing tests** — `crates/vigil/tests/renotify.rs`
 
 ```rust
 mod common;
-use common::{seed_monitor_with_email_channel, test_state, test_state_prober};
+use common::{seed_monitor_with_email_channel, test_state, test_state_offline};
 use vigil::renotify::renotify_once;
 
 fn now() -> i64 {
@@ -524,7 +492,7 @@ async fn disabled_when_renotify_hours_zero() {
 
 #[tokio::test]
 async fn skips_pass_when_connectivity_offline() {
-    let env = test_state_prober(false).await; // anchor.current() == Offline
+    let env = test_state_offline().await; // existing helper; anchor.current() == Offline
     seed_down_incident(&env.state.db, 7 * 3600).await;
     renotify_once(&env.state).await.unwrap();
     assert_eq!(env.sent.lock().unwrap().len(), 0, "offline: do not remind about outages");
@@ -554,21 +522,69 @@ async fn baseline_is_incident_scoped_not_monitor_wide() {
 #[tokio::test]
 async fn baseline_advances_no_double_fire() {
     let env = test_state().await;
+    // Disable deliver()'s 15-min cooldown so ONLY the re-notify baseline gates
+    // the second pass — otherwise the cooldown would suppress it regardless and
+    // the test could not distinguish a working baseline from a broken one.
+    vigil::settings_store::set(&env.state.db, "notify.cooldown_minutes", "0").await.unwrap();
     seed_down_incident(&env.state.db, 7 * 3600).await;
     renotify_once(&env.state).await.unwrap();
     renotify_once(&env.state).await.unwrap();
-    assert_eq!(env.sent.lock().unwrap().len(), 1, "second immediate pass must not double-fire");
+    assert_eq!(env.sent.lock().unwrap().len(), 1, "baseline advanced → second immediate pass does not double-fire");
 }
 
 #[tokio::test]
-async fn skips_deleted_monitor_without_panic() {
+async fn deleted_monitor_produces_no_reminder_and_no_panic() {
     let env = test_state().await;
     let (mid, _iid) = seed_down_incident(&env.state.db, 7 * 3600).await;
-    // Delete the monitor AND leave a dangling incident row (simulate a race:
-    // FK cascade normally removes it, but assert the load-None path is safe).
+    // Deleting the monitor FK-cascades its incident (incidents.monitor_id
+    // ON DELETE CASCADE), so the scan's JOIN drops it → no reminder, no panic.
+    // (This verifies cascade cleanup. The `let Some(m) = m else { continue }`
+    // in renotify_once is a defensive guard for a true mid-pass delete race,
+    // near-unreachable given the JOIN — not exercised here.)
     sqlx::query("DELETE FROM monitors WHERE id = ?").bind(mid).execute(&env.state.db).await.unwrap();
     renotify_once(&env.state).await.unwrap(); // must not panic
     assert_eq!(env.sent.lock().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn heartbeat_monitor_renotifies_with_reminder() {
+    let env = test_state().await;
+    // A heartbeat monitor, status='down', with a channel subscribed to
+    // heartbeat_missed (seed_monitor_with_email_channel only subscribes
+    // ["down","recovered"], so it would wrongly send zero here).
+    let mid: i64 = sqlx::query_scalar(
+        "INSERT INTO monitors (name, type, url, status, created_at, updated_at) \
+         VALUES ('cron','heartbeat',NULL,'down',0,0) RETURNING id",
+    ).fetch_one(&env.state.db).await.unwrap();
+    let cid: i64 = sqlx::query_scalar(
+        "INSERT INTO notification_channels (name, type, config, is_active, created_at) \
+         VALUES ('e','email','{\"host\":\"h\",\"port\":25,\"security\":\"none\",\"from\":\"f@b\",\"to\":[\"a@b\"]}',1,0) RETURNING id",
+    ).fetch_one(&env.state.db).await.unwrap();
+    sqlx::query("INSERT INTO monitor_notifications (monitor_id, channel_id, triggers) VALUES (?, ?, '[\"heartbeat_missed\"]')")
+        .bind(mid).bind(cid).execute(&env.state.db).await.unwrap();
+    sqlx::query("INSERT INTO incidents (monitor_id, started_at, acknowledged) VALUES (?, ?, 0)")
+        .bind(mid).bind(now() - 7 * 3600).execute(&env.state.db).await.unwrap();
+
+    renotify_once(&env.state).await.unwrap();
+    let sent = env.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1, "heartbeat outage must re-notify via heartbeat_missed");
+    assert!(sent[0].1.subject.starts_with("Reminder:"), "reminder prefix for heartbeat too");
+    assert!(sent[0].1.body_text.contains("Still down for"));
+}
+
+#[tokio::test]
+async fn first_down_alert_is_byte_identical_not_decorated() {
+    // Guard the "decorate in renotify, DON'T touch templates" choice: the
+    // initial (non-reminder) down alert must be exactly as it was pre-P4.3.
+    let env = test_state().await;
+    let mid = seed_monitor_with_email_channel(&env.state.db).await; // name 'seed'
+    let m: vigil::models::Monitor = sqlx::query_as("SELECT * FROM monitors WHERE id = ?")
+        .bind(mid).fetch_one(&env.state.db).await.unwrap();
+    vigil::notify::dispatch::on_transition(&env.state, &m, vigil::models::Trigger::Down, Some(1)).await.unwrap();
+    let sent = env.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].1.subject, "🔴 seed is DOWN", "first-alert subject unchanged");
+    assert!(!sent[0].1.body_text.contains("Still down for"), "first alert is not decorated");
 }
 ```
 
@@ -820,13 +836,17 @@ async fn maintenance_covered_outage_is_excluded_from_uptime() {
     sqlx::query("INSERT INTO incidents (monitor_id, started_at, resolved_at, cause) VALUES (?, ?, ?, 'timeout')")
         .bind(mid).bind(ds + 3600).bind(ds + 7200).execute(&env.state.db).await.unwrap();
     let target = format!("[{mid}]");
+    // Window covers only the OUTAGE (ds+3000..ds+7800 ⊇ the ds+3600..ds+7200
+    // incident), NOT the whole day — otherwise eff_denom=0 → uptime_pct=None
+    // and the Some(100.0) assertion would fail (uptime.rs eff_denom<=0 branch).
+    let _ = de;
     sqlx::query(
         "INSERT INTO maintenance_windows (name, scope, target_ref, starts_at, ends_at, recurrence, suppress, is_active, created_at) \
          VALUES ('w','monitors',?,?,?,NULL,'alerts',1,0)",
-    ).bind(target).bind(ds).bind(de).execute(&env.state.db).await.unwrap();
+    ).bind(target).bind(ds + 3000).bind(ds + 7800).execute(&env.state.db).await.unwrap();
 
     let s = build(&env.state, &day).await.unwrap();
-    assert_eq!(s.fleet.uptime_pct, Some(100.0), "maintenance downtime is excluded");
+    assert_eq!(s.fleet.uptime_pct, Some(100.0), "outage fully inside maintenance → excluded, fleet 100%");
     assert_eq!(s.fleet.clean_monitors, 1);
     assert_eq!(s.fleet.downtime_seconds, 0);
 }
@@ -1323,6 +1343,7 @@ pub fn parse_digest_time(s: &str) -> i64 {
             }
         }
     }
+    tracing::warn!(input = %s, "invalid digest_time; falling back to 08:00");
     8 * 3600
 }
 
@@ -1505,7 +1526,7 @@ git commit -am "feat(p4.3): daily digest delivery + UTC scheduler (dead-man's sw
 ### Task 7: Frontend — settings controls + acknowledge hint
 
 **Files:**
-- Modify: `web/src/api.ts`, `web/src/components/Settings.tsx`, `web/src/components/DetailPanel.tsx`
+- Modify: `web/src/api.ts`, `web/src/components/Settings.tsx`, `web/src/components/Incidents.tsx`, `web/src/components/IncidentTimeline.tsx`
 - Test: `web/src/__tests__/settings.test.tsx`
 
 **Interfaces:**
@@ -1679,9 +1700,9 @@ Digest (recipients: reuse the component's existing channels list if one is alrea
 
 For `emailChannels()`: if the component already loads channels (it manages the channel list), derive `const emailChannels = () => channels().filter((c) => c.type === "email")`. If no channels signal exists yet, add `const [emailChannels, setEmailChannels] = createSignal<any[]>([]);` and, in `onMount`, `const chs = await fetch("/api/channels").then((r) => r.json()); setEmailChannels((chs || []).filter((c: any) => c.type === "email"));`. Reuse whichever already exists — do not add a duplicate channels fetch.
 
-- [ ] **Step 4: Add the acknowledge hint** — `web/src/components/DetailPanel.tsx`
+- [ ] **Step 4: Add the acknowledge hint** — `web/src/components/Incidents.tsx` AND `web/src/components/IncidentTimeline.tsx`
 
-Find the incident "Acknowledge" button label/tooltip and change its accessible hint to convey it silences reminders, e.g. add `title="Acknowledge (silences re-notify reminders)"` to the button (keep the visible label "Acknowledge").
+The Acknowledge controls live in BOTH `Incidents.tsx` (the global Incidents screen, button ~line 160) and `IncidentTimeline.tsx` (rendered inside the detail panel, button ~line 184) — NOT in `DetailPanel.tsx`. Add `title="Acknowledge (silences re-notify reminders)"` to the Acknowledge button in each, keeping the visible label "Acknowledge".
 
 - [ ] **Step 5: Run tests + typecheck + build**
 
