@@ -61,8 +61,68 @@ pub fn next_month(period: &str) -> String {
     f.checked_add_months(chrono::Months::new(1)).unwrap_or(f).format("%Y-%m").to_string()
 }
 
-// (`generate` + `send_report_email` are added in Task 4.)
 pub use compute::{compute, fleet_uptime_for, ExpiryItem, FleetReport, LongestOutage, MonitorReport, ReportIncident, ReportSummary};
+
+use crate::app::AppState;
+use crate::digest::SendOutcome;
+use crate::notify::dispatch;
+
+fn now_ts() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+/// Compute + UPSERT the report row for `period` (idempotent per month). No SSE event.
+pub async fn generate(state: &AppState, period: &str) -> anyhow::Result<Report> {
+    let summary = compute::compute(state, period).await?;
+    let (ps, pe) = month_bounds(period);
+    let json = serde_json::to_string(&summary)?;
+    sqlx::query(
+        "INSERT INTO reports (period_start, period_end, label, generated_at, summary_json, emailed_at) \
+         VALUES (?, ?, ?, ?, ?, NULL) \
+         ON CONFLICT(period_start) DO UPDATE SET label=excluded.label, generated_at=excluded.generated_at, summary_json=excluded.summary_json, emailed_at=NULL",
+    ).bind(ps).bind(pe).bind(month_label(period)).bind(summary.generated_at).bind(&json).execute(&state.db).await?;
+    let row: Report = sqlx::query_as("SELECT * FROM reports WHERE period_start = ?").bind(ps).fetch_one(&state.db).await?;
+    Ok(row)
+}
+
+/// Email the rendered HTML report to `report_recipients` (mirrors digest::send).
+pub async fn send_report_email(state: &AppState, report: &Report) -> SendOutcome {
+    let ids: Vec<i64> = serde_json::from_str(&crate::settings_store::get(&state.db, "report_recipients", "[]").await).unwrap_or_default();
+    let mut channels: Vec<(i64, String)> = Vec::new();
+    for id in &ids {
+        let cfg: Option<String> = sqlx::query_scalar("SELECT config FROM notification_channels WHERE id = ? AND type = 'email' AND is_active = 1")
+            .bind(id).fetch_optional(&state.db).await.ok().flatten();
+        if let Some(cfg) = cfg { channels.push((*id, cfg)); }
+    }
+    if channels.is_empty() {
+        let _ = log_report(state, None, false, Some("no deliverable email recipients")).await;
+        return SendOutcome::NothingToSend;
+    }
+    let summary: compute::ReportSummary = serde_json::from_str(&report.summary_json).unwrap_or_else(|_| panic!("report summary_json must parse"));
+    let html = html::render_html(&summary);
+    let subject = format!("Vigil monthly report — {} — {} uptime", report.label,
+        summary.fleet.uptime_pct.map(|p| format!("{p:.2}%")).unwrap_or_else(|| "n/a".into()));
+    let body_text = format!("Vigil monthly report for {}. Open the HTML version for the full report.", report.label);
+    let mut any_ok = false;
+    for (id, cfg) in channels {
+        let r = dispatch::send_email_via_channel(state.transport.as_ref(), &cfg, &subject, &body_text, Some(html.clone())).await;
+        let (ok, err) = match &r { Ok(()) => (true, None), Err(e) => (false, Some(e.to_string())) };
+        any_ok |= ok;
+        let _ = log_report(state, Some(id), ok, err.as_deref()).await;
+    }
+    if any_ok {
+        let _ = sqlx::query("UPDATE reports SET emailed_at = ? WHERE id = ?").bind(now_ts()).bind(report.id).execute(&state.db).await;
+        SendOutcome::Delivered
+    } else {
+        SendOutcome::AllFailed
+    }
+}
+
+async fn log_report(state: &AppState, channel_id: Option<i64>, success: bool, error: Option<&str>) -> anyhow::Result<()> {
+    sqlx::query("INSERT INTO notification_log (monitor_id, channel_id, incident_id, trigger, sent_at, success, error) VALUES (NULL, ?, NULL, 'report', ?, ?, ?)")
+        .bind(channel_id).bind(now_ts()).bind(success).bind(error).execute(&state.db).await?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
