@@ -3,7 +3,7 @@
   --border-subtle:#161435; --border-default:#242145; --border-strong:#332e5e;
   --text-primary:#EAEDF3; --text-secondary:#9BA6BC; --text-tertiary:#5F6C86; --text-disabled:#3D4862;
   --up:#35D07F; --down:#F26D6D; --degraded:#F5A623; --paused:#6B7688; --pending:#5B8DEF; --maintenance:#B58BF5; --unknown:#4A5670;
-  --accent:#3FC8E4; --accent-weak:rgba(63,200,228,0.14); --focus-ring:#3FC8E4;
+  --accent:#3FC8E4; --accent-weak:rgba(63,200,228,0.14); --focus-ring:#3FC8E4; --accent-fg:#04222b;
   --r-sm:6px; --r-md:10px; --r-lg:14px; --r-pill:999px;
 }
 *{box-sizing:border-box} html,body{margin:0} body{background:var(--bg-base);color:var(--text-primary);font-family:Inter,system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.45}
@@ -76,7 +76,7 @@ button{font-family:inherit;color:inherit}
 .chip[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);background:var(--accent-weak)}
 .spacer{flex:1}
 .btn-accent{
-  background:var(--accent);color:#04222b;border:none;border-radius:var(--r-md);
+  background:var(--accent);color:var(--accent-fg);border:none;border-radius:var(--r-md);
   padding:9px 16px;font-weight:600;font-size:13px;cursor:pointer;
 }
 .btn-accent:hover{filter:brightness(1.08)}

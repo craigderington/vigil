@@ -27,5 +27,16 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
+    // Node >=22 defines a native (experimental) global `localStorage` that
+    // throws/returns undefined without --localstorage-file. Vitest's jsdom
+    // environment only copies a window property onto the global scope when
+    // the key isn't already present on `global` (see populateGlobal's `k in
+    // global` check), so Node's stub wins and shadows jsdom's real
+    // localStorage. Disabling the experimental flag in the test worker lets
+    // jsdom's window.localStorage populate the global as intended.
+    poolOptions: {
+      threads: { execArgv: ["--no-experimental-webstorage"] },
+      forks: { execArgv: ["--no-experimental-webstorage"] },
+    },
   },
 });
