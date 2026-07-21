@@ -14,6 +14,10 @@ export interface MonitorFormProps {
   monitor?: any;
   onSaved: () => void;
   onClose: () => void;
+  /** True while the panel is animating out (driven by `createExitTransition`
+   *  in App.tsx) — toggles the `.closing` class that plays the reverse
+   *  slide/fade keyframes instead of snapping shut. */
+  closing?: boolean;
 }
 
 const MONITOR_TYPES: { label: string; value: string }[] = [
@@ -461,9 +465,9 @@ const MonitorForm: Component<MonitorFormProps> = (props) => {
   }
 
   return (
-    <div class="detail-backdrop" onClick={dismiss}>
+    <div class={`detail-backdrop${props.closing ? " closing" : ""}`} onClick={dismiss}>
       <div
-        class="detail-panel"
+        class={`detail-panel${props.closing ? " closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={isEdit() ? "Edit monitor" : "Add monitor"}

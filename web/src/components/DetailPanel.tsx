@@ -15,6 +15,10 @@ export interface DetailPanelProps {
   onClose: () => void;
   onEdit?: (monitor: any) => void;
   onChanged?: () => void;
+  /** True while the panel is animating out (driven by `createExitTransition`
+   *  in App.tsx) — toggles the `.closing` class that plays the reverse
+   *  slide/fade keyframes instead of snapping shut. */
+  closing?: boolean;
   /** `store.certVersion` — threaded down to `SslCard` and `DomainCard` so
    *  they refetch on a `cert_updated` SSE frame instead of only on mount
    *  (`refresh_domain` emits the same event as `refresh_ssl`). */
@@ -175,9 +179,9 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
   const responseCountUp = createCountUp(displayResponseMs, 320);
 
   return (
-    <div class="detail-backdrop" onClick={props.onClose}>
+    <div class={`detail-backdrop${props.closing ? " closing" : ""}`} onClick={props.onClose}>
       <div
-        class="detail-panel"
+        class={`detail-panel${props.closing ? " closing" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`${props.monitor?.name ?? "Monitor"} details`}

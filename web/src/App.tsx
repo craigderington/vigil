@@ -1,7 +1,8 @@
-import { createMemo, createSignal, Match, Show, Switch, type Component } from "solid-js";
+import { createEffect, createMemo, createSignal, Match, Show, Switch, type Component } from "solid-js";
 import { createMonitorStore } from "./store";
 import * as api from "./api";
 import { inMaintenance } from "./maintenance_ids";
+import { createExitTransition } from "./motion";
 import Rail, { type RailView } from "./components/Rail";
 import TopBar from "./components/TopBar";
 import ConnectivityBanner from "./components/ConnectivityBanner";
@@ -51,12 +52,25 @@ const App: Component = () => {
   // in the panel without a separate fetch or a stale snapshot.
   const openMonitor = createMemo(() => store.monitorById(openMonitorId()));
 
+  // Delayed-unmount lifecycle (Task 3's createExitTransition) so the detail
+  // panel slides out gracefully instead of vanishing when openMonitorId
+  // flips to null. `openMonitor()` becomes undefined the instant
+  // openMonitorId is cleared, so the last-seen monitor is retained
+  // separately — otherwise the panel content would blank out mid-slide.
+  const detailTx = createExitTransition(() => openMonitorId() != null, 260);
+  const [retainedMonitor, setRetainedMonitor] = createSignal<any>(undefined);
+  createEffect(() => { const m = openMonitor(); if (m) setRetainedMonitor(m); });
+  const detailMonitor = () => openMonitor() ?? retainedMonitor(); // last monitor stays during close
+
   // Add/Edit monitor form. `formMonitor() === undefined` means ADD mode;
   // any other value (including a monitor object) means EDIT mode for that
   // monitor. `formOpen` is a separate signal so "Add" (no monitor) is
   // distinguishable from "form closed".
   const [formOpen, setFormOpen] = createSignal(false);
   const [formMonitor, setFormMonitor] = createSignal<any | undefined>(undefined);
+  // formMonitor() isn't cleared on close, so unlike the detail panel no
+  // separate retention signal is needed to keep content visible mid-slide.
+  const formTx = createExitTransition(() => formOpen(), 260);
 
   const addMonitor = () => {
     setFormMonitor(undefined);
@@ -147,17 +161,18 @@ const App: Component = () => {
           </Match>
         </Switch>
       </div>
-      <Show when={openMonitor()}>
+      <Show when={detailTx.mounted()}>
         <DetailPanel
-          monitor={openMonitor()}
+          monitor={detailMonitor()}
+          closing={detailTx.closing()}
           onClose={() => setOpenMonitorId(null)}
           onChanged={store.refresh}
           onEdit={editMonitor}
           certVersion={store.certVersion}
         />
       </Show>
-      <Show when={formOpen()}>
-        <MonitorForm api={api} monitor={formMonitor()} onSaved={onFormSaved} onClose={closeForm} />
+      <Show when={formTx.mounted()}>
+        <MonitorForm api={api} monitor={formMonitor()} onSaved={onFormSaved} onClose={closeForm} closing={formTx.closing()} />
       </Show>
     </div>
   );

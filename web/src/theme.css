@@ -426,3 +426,9 @@ button{font-family:inherit;color:inherit}
 .accent-swatch{width:32px;height:32px;border-radius:var(--r-md);border:2px solid var(--border-default);cursor:pointer;padding:0}
 .accent-swatch:hover{border-color:var(--border-strong)}
 .accent-swatch[aria-pressed="true"]{border-color:var(--text-primary);box-shadow:0 0 0 2px var(--bg-base),0 0 0 4px var(--focus-ring)}
+
+/* ---------- Panel exit transitions (P4.6 Task 5) ---------- */
+@keyframes panel-slide-out{from{transform:translateX(0)}to{transform:translateX(100%)}}
+@keyframes backdrop-fade-out{from{opacity:1}to{opacity:0}}
+.detail-panel.closing{animation:panel-slide-out 260ms cubic-bezier(0.32,0.72,0,1) forwards}
+.detail-backdrop.closing{animation:backdrop-fade-out 200ms ease-out forwards}
