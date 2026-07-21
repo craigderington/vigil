@@ -48,3 +48,12 @@ test("clicking the grip does not open the card", async () => {
   fireEvent.click(screen.getByLabelText("Reorder alpha (use arrow keys)"));
   expect(onOpen).not.toHaveBeenCalled();
 });
+
+test("Enter on a card's grip does not open the card", async () => {
+  stubFetch();
+  const onOpen = vi.fn();
+  render(() => <MonitorGrid monitors={M} onOpen={onOpen} reorderEnabled onReorder={() => {}} />);
+  await screen.findByText("alpha");
+  fireEvent.keyDown(screen.getByLabelText("Reorder alpha (use arrow keys)"), { key: "Enter" });
+  expect(onOpen).not.toHaveBeenCalled();
+});

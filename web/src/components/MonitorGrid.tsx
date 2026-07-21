@@ -27,22 +27,28 @@ const MonitorGrid: Component<MonitorGridProps> = (props) => {
   };
 
   function onGripDown(id: number, _e: PointerEvent) {
-    if (!props.reorderEnabled) return;
+    if (!props.reorderEnabled || draggingId() != null) return;
     setDraggingId(id);
     setDragOrder(currentIds());
     const move = (ev: PointerEvent) => onMove(ev);
     const up = () => finishDrag(true);
     const cancel = () => finishDrag(false);
     const key = (ev: KeyboardEvent) => { if (ev.key === "Escape") finishDrag(false); };
+    // A pointerup that lands outside the window (taskbar, another monitor,
+    // alt-tab) is never delivered — without this, the grid would stay
+    // frozen in drag order and these listeners would leak.
+    const blur = () => finishDrag(false);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
     window.addEventListener("keydown", key);
+    window.addEventListener("blur", blur);
     cleanup = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", key);
+      window.removeEventListener("blur", blur);
     };
   }
 
