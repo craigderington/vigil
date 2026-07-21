@@ -104,7 +104,13 @@ const App: Component = () => {
                 <Show
                   when={store.layout() === "list"}
                   fallback={
-                    <MonitorGrid monitors={filtered()} onOpen={setOpenMonitorId} onChanged={store.refresh} />
+                    <MonitorGrid
+                      monitors={filtered()}
+                      onOpen={setOpenMonitorId}
+                      onChanged={store.refresh}
+                      reorderEnabled={!query().trim() && statusFilter() === null}
+                      onReorder={store.persistReorder}
+                    />
                   }
                 >
                   <ListView

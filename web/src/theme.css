@@ -412,3 +412,12 @@ button{font-family:inherit;color:inherit}
   border:1px solid var(--border-subtle);border-radius:var(--r-md);
   padding:16px;text-align:center;
 }
+
+.card-grip{display:inline-flex;align-items:center;justify-content:center;padding:0 4px;margin-right:2px;background:none;border:none;color:var(--text-tertiary);cursor:grab;touch-action:none;line-height:0;border-radius:var(--r-sm)}
+.card-grip:hover{color:var(--text-secondary)}
+.card-grip:active{cursor:grabbing}
+.card-grip:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.card-grip .grip-icon{fill:currentColor}
+.monitor-card.dragging{opacity:.6;transform:scale(1.02);box-shadow:0 12px 28px rgba(0,0,0,.5);pointer-events:none;z-index:2}
+@media (prefers-reduced-motion:reduce){.monitor-card.dragging{transform:none}}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
