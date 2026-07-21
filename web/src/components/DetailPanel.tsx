@@ -2,6 +2,7 @@ import { createResource, createSignal, onCleanup, onMount, Show, type Component 
 import * as api from "../api";
 import type { StatsRange } from "../api";
 import { displayStatus } from "../maintenance_ids";
+import { createCountUp } from "../motion";
 import DomainCard from "./DomainCard";
 import HeartbeatCard from "./HeartbeatCard";
 import IncidentTimeline from "./IncidentTimeline";
@@ -171,6 +172,8 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
     return typeof avg === "number" ? avg : null;
   }
 
+  const responseCountUp = createCountUp(displayResponseMs, 320);
+
   return (
     <div class="detail-backdrop" onClick={props.onClose}>
       <div
@@ -252,8 +255,8 @@ const DetailPanel: Component<DetailPanelProps> = (props) => {
                   <div class="detail-tile">
                     <span class="detail-tile-label">Response time</span>
                     <span class="detail-tile-value mono">
-                      <Show when={displayResponseMs() != null} fallback="No data">
-                        {Math.round(displayResponseMs() as number)}
+                      <Show when={responseCountUp() != null} fallback="No data">
+                        {Math.round(responseCountUp() as number)}
                         <span class="unit">ms</span>
                       </Show>
                     </span>
