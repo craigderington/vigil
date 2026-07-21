@@ -1,4 +1,4 @@
-import { test, expect } from "vitest"; import { applyEvent, applyCertBump, type StoreState } from "../store";
+import { test, expect, vi } from "vitest"; import { applyEvent, applyCertBump, computeReorder, moveByOffset, reorderState, createMonitorStore, type StoreState } from "../store";
 import { displayStatusWith, setMaintenanceIds, patchMaintenance, inMaintenance } from "../maintenance_ids";
 test("snapshot replaces then delta patches", () => {
   let s: StoreState = { monitors: [], online: true };
@@ -57,4 +57,58 @@ test("displayStatusWith: paused > maintenance > real status precedence", () => {
   expect(displayStatusWith({ id: 2, is_paused: true, status: "up" }, ids)).toBe("paused");
   // Not in the set -> real status passes through untouched.
   expect(displayStatusWith({ id: 3, status: "down" }, ids)).toBe("down");
+});
+
+test("computeReorder does a standard array-move to the target's position", () => {
+  expect(computeReorder([1, 2, 3], 3, 1)).toEqual([3, 1, 2]); // drag 3 onto 1
+  expect(computeReorder([1, 2, 3], 1, 3)).toEqual([2, 3, 1]); // drag 1 onto 3
+  expect(computeReorder([1, 2, 3], 2, 2)).toEqual([1, 2, 3]); // onto itself → no-op
+  expect(computeReorder([1, 2, 3], 9, 1)).toEqual([1, 2, 3]); // absent id → no-op
+});
+
+test("moveByOffset nudges one slot and clamps at the ends", () => {
+  expect(moveByOffset([1, 2, 3], 2, -1)).toEqual([2, 1, 3]); // up
+  expect(moveByOffset([1, 2, 3], 2, 1)).toEqual([1, 3, 2]);  // down
+  expect(moveByOffset([1, 2, 3], 1, -1)).toEqual([1, 2, 3]); // already first → clamp
+  expect(moveByOffset([1, 2, 3], 3, 1)).toEqual([1, 2, 3]);  // already last → clamp
+});
+
+test("reorderState reorders monitors AND patches each sort_order to its index", () => {
+  const s = { monitors: [{ id: 1, sort_order: 0 }, { id: 2, sort_order: 1 }, { id: 3, sort_order: 2 }], online: true };
+  const out = reorderState(s, [3, 1, 2]);
+  expect(out.monitors.map((m) => m.id)).toEqual([3, 1, 2]);
+  expect(out.monitors.map((m) => m.sort_order)).toEqual([0, 1, 2]);
+});
+
+test("an optimistic reorder survives a monitor_updated delta and matches a later snapshot", () => {
+  const s = { monitors: [{ id: 1, sort_order: 0, status: "up" }, { id: 2, sort_order: 1, status: "up" }], online: true };
+  const reordered = reorderState(s, [2, 1]);
+  // a live status delta must NOT disturb order
+  const afterDelta = applyEvent(reordered, { event: "monitor_updated", data: { id: 1, status: "down" } });
+  expect(afterDelta.monitors.map((m) => m.id)).toEqual([2, 1]);
+  // a snapshot carrying the persisted order is adopted identically
+  const afterSnap = applyEvent(afterDelta, { event: "snapshot", data: { monitors: [{ id: 2, sort_order: 0 }, { id: 1, sort_order: 1 }], online: true } });
+  expect(afterSnap.monitors.map((m) => m.id)).toEqual([2, 1]);
+});
+
+test("persistReorder reverts via refresh() when the POST fails", async () => {
+  // createMonitorStore opens an EventSource on init; stub it so jsdom doesn't throw.
+  vi.stubGlobal("EventSource", class { onmessage: any = null; close() {} } as any);
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, opts?: any) => {
+    calls.push(`${opts?.method ?? "GET"} ${url}`);
+    if (String(url).includes("/reorder")) return { ok: false, status: 500, json: async () => ({}) } as any;
+    return { ok: true, json: async () => [] } as any; // GET /api/monitors (initial + revert refresh)
+  }));
+
+  const store = createMonitorStore();
+  await store.persistReorder([2, 1]);
+  store.close();
+
+  const postIdx = calls.findIndex((c) => c.startsWith("POST /api/monitors/reorder"));
+  expect(postIdx).toBeGreaterThanOrEqual(0);
+  // a failed reorder POST must be followed by a GET /api/monitors (refresh() revert)
+  expect(calls.slice(postIdx + 1)).toContain("GET /api/monitors");
+
+  vi.unstubAllGlobals();
 });

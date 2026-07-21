@@ -61,6 +61,47 @@ export function applyEvent(s: StoreState, ev: StoreEvent): StoreState {
   }
 }
 
+/** Move `draggedId` to `targetId`'s position (standard array-move: remove the
+ *  dragged id, then insert it at the target's ORIGINAL index). This gives the
+ *  intuitive result in both directions — dragging onto the next neighbor swaps
+ *  them (NOT a no-op), dragging onto a lower card lands after it. Pure; used by
+ *  the drag hit-test. No-op if either id is absent or they're the same. */
+export function computeReorder(order: number[], draggedId: number, targetId: number): number[] {
+  if (draggedId === targetId) return order;
+  const from = order.indexOf(draggedId);
+  const to = order.indexOf(targetId);
+  if (from === -1 || to === -1) return order;
+  const next = order.slice();
+  next.splice(from, 1);
+  next.splice(to, 0, draggedId);
+  return next;
+}
+
+/** Nudge `id` by `delta` slots (clamped). Pure; used by the keyboard reorder. */
+export function moveByOffset(order: number[], id: number, delta: number): number[] {
+  const i = order.indexOf(id);
+  if (i === -1) return order;
+  const j = Math.max(0, Math.min(order.length - 1, i + delta));
+  if (i === j) return order;
+  const next = order.slice();
+  next.splice(i, 1);
+  next.splice(j, 0, id);
+  return next;
+}
+
+/** Apply an id order to the monitor list: reorder AND set each monitor's
+ *  `sort_order` to its new index (the grid renders array order; ListView
+ *  value-sorts by `sort_order` — both must agree). Monitors not named in
+ *  `orderedIds` (shouldn't happen — reorder is disabled while filtered) keep
+ *  their relative order, appended. Pure. */
+export function reorderState(s: StoreState, orderedIds: number[]): StoreState {
+  const byId = new Map(s.monitors.map((m) => [m.id, m]));
+  const named = new Set(orderedIds);
+  const moved = orderedIds.filter((id) => byId.has(id)).map((id, i) => ({ ...byId.get(id), sort_order: i }));
+  const rest = s.monitors.filter((m) => !named.has(m.id));
+  return { ...s, monitors: [...moved, ...rest] };
+}
+
 function patchMonitor(monitors: any[], id: number, patch: Record<string, any>): any[] {
   const idx = monitors.findIndex((m) => m.id === id);
   if (idx === -1) return monitors;
@@ -122,6 +163,24 @@ export function createMonitorStore() {
     }
   }
 
+  /** Optimistically apply a new card order, then persist it. On failure,
+   *  refresh() reverts to server truth. The optimistic step (reorderState)
+   *  makes the drag survive both `monitor_updated` deltas and the next
+   *  `snapshot` (which will now carry the same DB order). */
+  async function persistReorder(orderedIds: number[]) {
+    setState("monitors", reconcile(reorderState(state, orderedIds).monitors, { key: "id" }));
+    try {
+      const res = await fetch("/api/monitors/reorder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(orderedIds),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      await refresh();
+    }
+  }
+
   function connect() {
     const es = new EventSource("/events");
     es.onmessage = (msg) => {
@@ -162,6 +221,7 @@ export function createMonitorStore() {
     online: () => state.online,
     monitorById,
     refresh,
+    persistReorder,
     close: () => source.close(),
     layout,
     setLayout,
