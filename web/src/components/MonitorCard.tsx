@@ -125,7 +125,10 @@ const MonitorCard: Component<MonitorCardProps> = (props) => {
             aria-label={`Reorder ${props.monitor.name} (use arrow keys)`}
             title="Drag to reorder"
             onPointerDown={(e) => { e.stopPropagation(); props.onGripDown?.(props.monitor.id, e); }}
-            onKeyDown={(e) => { e.stopPropagation(); props.onGripKey?.(props.monitor.id, e); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " " || e.key.startsWith("Arrow")) e.stopPropagation();
+              props.onGripKey?.(props.monitor.id, e);
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <svg class="grip-icon" viewBox="0 0 10 16" width="10" height="16" aria-hidden="true">
