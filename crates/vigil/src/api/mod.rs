@@ -37,6 +37,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/monitors", get(monitors::list).post(monitors::create))
         .route("/monitors/test-check", post(monitors::test_check))
+        .route("/monitors/reorder", post(monitors::reorder))
         .route(
             "/monitors/:id",
             get(monitors::get_one).put(monitors::update).delete(monitors::delete),

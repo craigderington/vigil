@@ -109,3 +109,45 @@ async fn serve(state: vigil::app::AppState) -> std::net::SocketAddr {
     let err = test_resp["error"].as_str().unwrap_or("");
     assert!(!err.contains("expected struct"), "test must not fail on config parse; got: {err}");
 }
+#[tokio::test]
+async fn reorder_persists_sort_order() {
+    let env = test_state().await;
+    let a = serve(env.state.clone()).await;
+    let c = reqwest::Client::new();
+
+    let mut ids = vec![];
+    for n in ["a", "b", "c"] {
+        let m: serde_json::Value = c.post(format!("http://{a}/api/monitors"))
+            .json(&serde_json::json!({"name": n, "url": "https://e.com"}))
+            .send().await.unwrap().json().await.unwrap();
+        ids.push(m["id"].as_i64().unwrap());
+    }
+
+    // reverse the order
+    let new_order = vec![ids[2], ids[1], ids[0]];
+    let r = c.post(format!("http://{a}/api/monitors/reorder"))
+        .json(&new_order).send().await.unwrap();
+    assert!(r.status().is_success(), "reorder status: {}", r.status());
+
+    let list: serde_json::Value = c.get(format!("http://{a}/api/monitors"))
+        .send().await.unwrap().json().await.unwrap();
+    let got: Vec<i64> = list.as_array().unwrap().iter().map(|m| m["id"].as_i64().unwrap()).collect();
+    assert_eq!(got, new_order, "GET /monitors returns the new order");
+    let sort_orders: Vec<i64> = list.as_array().unwrap().iter().map(|m| m["sort_order"].as_i64().unwrap()).collect();
+    assert_eq!(sort_orders, vec![0, 1, 2], "sort_order == array index");
+
+    // Lenient contract: an unknown id in the body is a harmless no-op (0 rows),
+    // the known ids still get their positions.
+    let with_unknown = vec![ids[0], 9999, ids[1]];
+    let r2 = c.post(format!("http://{a}/api/monitors/reorder"))
+        .json(&with_unknown).send().await.unwrap();
+    assert!(r2.status().is_success(), "unknown id must not error: {}", r2.status());
+    let list2: serde_json::Value = c.get(format!("http://{a}/api/monitors"))
+        .send().await.unwrap().json().await.unwrap();
+    let so = |id: i64| -> Option<i64> {
+        list2.as_array().unwrap().iter()
+            .find(|m| m["id"].as_i64() == Some(id)).unwrap()["sort_order"].as_i64()
+    };
+    assert_eq!(so(ids[0]), Some(0), "ids[0] -> index 0");
+    assert_eq!(so(ids[1]), Some(2), "ids[1] -> index 2 (index 1's id 9999 doesn't exist)");
+}

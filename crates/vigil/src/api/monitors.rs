@@ -374,6 +374,27 @@ pub async fn update(
     Ok(Json(m))
 }
 
+/// Persist a new card order: body is the complete ordered list of monitor
+/// ids; each id's `sort_order` is set to its position. Both `list` and the
+/// SSE snapshot already `ORDER BY sort_order, id`, so the new order is
+/// immediately authoritative. Lenient: an unknown id updates 0 rows.
+pub async fn reorder(
+    State(state): State<AppState>,
+    Json(ids): Json<Vec<i64>>,
+) -> ApiResult<Value> {
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+    for (i, id) in ids.iter().enumerate() {
+        sqlx::query("UPDATE monitors SET sort_order = ? WHERE id = ?")
+            .bind(i as i64)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 pub async fn delete(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
     sqlx::query("DELETE FROM monitors WHERE id = ?")
         .bind(id)
