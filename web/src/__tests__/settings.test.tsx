@@ -78,3 +78,20 @@ test("saving re-notify hours PUTs renotify_hours", async () => {
   expect(put).toBeTruthy();
   expect(put.renotify_hours).toBe(12);
 });
+
+test("picking an accent swatch PUTs accent and applies --accent", async () => {
+  const puts: any[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: any, opts?: any) => {
+    if (url === "/api/settings" && opts?.method === "PUT") { puts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    if (url === "/api/settings") return { ok: true, json: async () => ({ anchors: [], retention_days: 30, accent: "cyan" }) };
+    return { ok: true, json: async () => [] };
+  }) as any);
+
+  render(() => <Settings />);
+  const yellow = await screen.findByRole("button", { name: /yellow accent/i });
+  fireEvent.click(yellow);
+
+  await screen.findByText(/appearance saved/i);
+  expect(puts.some((p) => p.accent === "the-open-yellow")).toBe(true);
+  expect(document.documentElement.style.getPropertyValue("--accent").trim()).toBe("#FFBA00");
+});

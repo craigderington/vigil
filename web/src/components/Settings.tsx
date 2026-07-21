@@ -1,5 +1,6 @@
 import { createSignal, For, onMount, Show, type Component } from "solid-js";
 import * as api from "../api";
+import { ACCENT_PRESETS, applyAccent, presetById } from "../accent";
 
 /**
  * Settings screen (Task 18): SMTP is edited as the single `email`
@@ -112,6 +113,13 @@ const Settings: Component = () => {
   const [reportSaving, setReportSaving] = createSignal(false);
   const [reportSaved, setReportSaved] = createSignal(false);
 
+  const [accentId, setAccentId] = createSignal(presetById(null).id);
+  const [accentSaved, setAccentSaved] = createSignal(false);
+  // Guards the onMount server-reconcile from clobbering a swatch the user
+  // clicked while the (async) settings load was still in flight — a real
+  // revert bug, and it also makes the accent test deterministic.
+  const [accentUserPicked, setAccentUserPicked] = createSignal(false);
+
   // Multi-type channel manager (Task 12): a list of every channel (any
   // type) plus an "Add channel" form with a type selector and type-specific
   // config fields. The single-email SMTP section above is untouched — this
@@ -182,6 +190,11 @@ const Settings: Component = () => {
       setReportDayOfMonth(typeof s?.report_day_of_month === "number" ? s.report_day_of_month : 1);
       setReportTime(typeof s?.report_time === "string" ? s.report_time : "08:00");
       setReportRecipients(Array.isArray(s?.report_recipients) ? s.report_recipients : []);
+      if (!accentUserPicked()) {
+        const serverAccent = presetById(s?.accent).id;
+        setAccentId(serverAccent);
+        applyAccent(serverAccent); // adopt the server value (e.g. set on another device) over boot's localStorage
+      }
     } catch {
       // stay on defaults
     }
@@ -451,9 +464,39 @@ const Settings: Component = () => {
     }
   }
 
+  async function chooseAccent(id: string) {
+    setAccentUserPicked(true);   // stop a late onMount reconcile from reverting this
+    setAccentId(presetById(id).id);
+    applyAccent(id);             // live, instant
+    setAccentSaved(false);
+    try { await api.updateSettings({ accent: presetById(id).id }); setAccentSaved(true); }
+    catch { /* leave applied; persistence retryable */ }
+  }
+
   return (
     <div class="settings-view">
       <h2 class="settings-title">Settings</h2>
+
+      <section class="form-section settings-section">
+        <h3 class="form-section-title">Appearance</h3>
+        <p class="settings-note">Accent color. Applies instantly and is remembered on this device.</p>
+        <div class="accent-swatches" role="group" aria-label="Accent color">
+          <For each={ACCENT_PRESETS}>
+            {(p) => (
+              <button
+                type="button"
+                class="accent-swatch"
+                aria-label={`${p.name} accent`}
+                aria-pressed={accentId() === p.id}
+                title={p.name}
+                style={{ background: p.accent }}
+                onClick={() => chooseAccent(p.id)}
+              />
+            )}
+          </For>
+        </div>
+        <Show when={accentSaved()}><div class="test-result mono">Appearance saved.</div></Show>
+      </section>
 
       <section class="form-section settings-section">
         <h3 class="form-section-title">Email (SMTP)</h3>
